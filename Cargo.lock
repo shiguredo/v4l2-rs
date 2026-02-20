@@ -397,7 +397,7 @@ checksum = "a078ffa6e1b8753fd989349a47cad9f703270181db89062c1a5f0ba9a1095713"
 
 [[package]]
 name = "shiguredo_v4l2"
-version = "2026.0.0"
+version = "2026.1.0-canary.0"
 dependencies = [
  "libc",
 ]
