@@ -1,0 +1,10 @@
+[package]
+name = "v4l2_m2m_encode"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+noargs = "0.4"
+shiguredo_mp4 = "2026.2.0-canary.2"
+shiguredo_v4l2 = { path = "../.." }
