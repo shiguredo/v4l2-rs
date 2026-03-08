@@ -1,0 +1,9 @@
+[env]
+CC_aarch64_unknown_linux_gnu = {relative = true, value = "target/shiguredo-sysroot/raspberry-pi-os_armv8/bin/aarch64-linux-gnu-gcc-with-sysroot.sh"}
+CXX_aarch64_unknown_linux_gnu = {relative = true, value = "target/shiguredo-sysroot/raspberry-pi-os_armv8/bin/aarch64-linux-gnu-g++-with-sysroot.sh"}
+[target.aarch64-unknown-linux-gnu]
+linker = "aarch64-linux-gnu-gcc"
+rustflags = ["-C", "link-arg=--sysroot=target/shiguredo-sysroot/raspberry-pi-os_armv8/sysroot"]
+
+[build]
+target = "aarch64-unknown-linux-gnu"
