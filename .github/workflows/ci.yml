@@ -69,7 +69,7 @@ jobs:
         run: |
           cargo build -p v4l2_m2m_check --target aarch64-unknown-linux-gnu --release
           cargo build -p v4l2_m2m_encode --target aarch64-unknown-linux-gnu --release
-          cargo build --manifest-path examples/v4l2_m2m_libcamera_encode/Cargo.toml --target-dir target --target aarch64-unknown-linux-gnu --release
+          cargo build -p v4l2_m2m_libcamera_encode --target aarch64-unknown-linux-gnu --release
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
