@@ -9,8 +9,6 @@ use std::num::NonZeroU32;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use libc;
-
 use shiguredo_libcamera::{
     CameraManager, ConfigStatus, FrameBufferAllocator, FrameStatus, PixelFormat, RequestStatus,
     Size, StreamRole,

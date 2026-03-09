@@ -14,8 +14,6 @@ libc = "0.2"
 members = [
     "examples/v4l2_m2m_check",
     "examples/v4l2_m2m_encode",
-    "pbt",
-]
-exclude = [
     "examples/v4l2_m2m_libcamera_encode",
+    "pbt",
 ]

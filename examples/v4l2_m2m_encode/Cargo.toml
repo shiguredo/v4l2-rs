@@ -6,5 +6,5 @@ publish = false
 
 [dependencies]
 noargs = "0.4"
-shiguredo_mp4 = "2026.2.0-canary.2"
+shiguredo_mp4 = "2026.2.0-canary.3"
 shiguredo_v4l2 = { path = "../.." }
