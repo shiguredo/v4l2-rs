@@ -10,6 +10,9 @@ repository = "https://github.com/shiguredo/v4l2-rs"
 [dependencies]
 libc = "0.2"
 
+[build-dependencies]
+bindgen = "0.72"
+
 [workspace]
 members = [
     "examples/v4l2_m2m_check",

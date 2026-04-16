@@ -557,6 +557,7 @@ checksum = "b060fffc1e7378d42623f8257807c1e44bd522f3c17b5179efb656b7ad77bd44"
 name = "shiguredo_v4l2"
 version = "2026.1.0-canary.1"
 dependencies = [
+ "bindgen",
  "libc",
 ]
 
