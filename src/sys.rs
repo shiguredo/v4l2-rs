@@ -107,13 +107,14 @@ pub(crate) const V4L2_BUF_FLAG_KEYFRAME: u32 = 0x00000008;
 // ---------------------------------------------------------------------------
 
 const V4L2_CTRL_CLASS_CODEC: u32 = 0x00990000;
+const V4L2_CID_CODEC_BASE: u32 = V4L2_CTRL_CLASS_CODEC | 0x900;
 
-pub(crate) const V4L2_CID_MPEG_VIDEO_H264_PROFILE: u32 = V4L2_CTRL_CLASS_CODEC + 363;
-pub(crate) const V4L2_CID_MPEG_VIDEO_H264_LEVEL: u32 = V4L2_CTRL_CLASS_CODEC + 364;
-pub(crate) const V4L2_CID_MPEG_VIDEO_H264_I_PERIOD: u32 = V4L2_CTRL_CLASS_CODEC + 358;
-pub(crate) const V4L2_CID_MPEG_VIDEO_REPEAT_SEQ_HEADER: u32 = V4L2_CTRL_CLASS_CODEC + 226;
-pub(crate) const V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME: u32 = V4L2_CTRL_CLASS_CODEC + 229;
-pub(crate) const V4L2_CID_MPEG_VIDEO_BITRATE: u32 = V4L2_CTRL_CLASS_CODEC + 207;
+pub(crate) const V4L2_CID_MPEG_VIDEO_H264_PROFILE: u32 = V4L2_CID_CODEC_BASE + 363;
+pub(crate) const V4L2_CID_MPEG_VIDEO_H264_LEVEL: u32 = V4L2_CID_CODEC_BASE + 359;
+pub(crate) const V4L2_CID_MPEG_VIDEO_H264_I_PERIOD: u32 = V4L2_CID_CODEC_BASE + 358;
+pub(crate) const V4L2_CID_MPEG_VIDEO_REPEAT_SEQ_HEADER: u32 = V4L2_CID_CODEC_BASE + 226;
+pub(crate) const V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME: u32 = V4L2_CID_CODEC_BASE + 229;
+pub(crate) const V4L2_CID_MPEG_VIDEO_BITRATE: u32 = V4L2_CID_CODEC_BASE + 207;
 
 // ---------------------------------------------------------------------------
 // H.264 プロファイル定数
@@ -128,14 +129,14 @@ pub(crate) const V4L2_MPEG_VIDEO_H264_PROFILE_HIGH: i32 = 4;
 // H.264 レベル定数
 // ---------------------------------------------------------------------------
 
-pub(crate) const V4L2_MPEG_VIDEO_H264_LEVEL_3_0: i32 = 9;
-pub(crate) const V4L2_MPEG_VIDEO_H264_LEVEL_3_1: i32 = 10;
-pub(crate) const V4L2_MPEG_VIDEO_H264_LEVEL_3_2: i32 = 11;
-pub(crate) const V4L2_MPEG_VIDEO_H264_LEVEL_4_0: i32 = 12;
-pub(crate) const V4L2_MPEG_VIDEO_H264_LEVEL_4_1: i32 = 13;
-pub(crate) const V4L2_MPEG_VIDEO_H264_LEVEL_4_2: i32 = 14;
-pub(crate) const V4L2_MPEG_VIDEO_H264_LEVEL_5_0: i32 = 15;
-pub(crate) const V4L2_MPEG_VIDEO_H264_LEVEL_5_1: i32 = 16;
+pub(crate) const V4L2_MPEG_VIDEO_H264_LEVEL_3_0: i32 = 8;
+pub(crate) const V4L2_MPEG_VIDEO_H264_LEVEL_3_1: i32 = 9;
+pub(crate) const V4L2_MPEG_VIDEO_H264_LEVEL_3_2: i32 = 10;
+pub(crate) const V4L2_MPEG_VIDEO_H264_LEVEL_4_0: i32 = 11;
+pub(crate) const V4L2_MPEG_VIDEO_H264_LEVEL_4_1: i32 = 12;
+pub(crate) const V4L2_MPEG_VIDEO_H264_LEVEL_4_2: i32 = 13;
+pub(crate) const V4L2_MPEG_VIDEO_H264_LEVEL_5_0: i32 = 14;
+pub(crate) const V4L2_MPEG_VIDEO_H264_LEVEL_5_1: i32 = 15;
 
 // ---------------------------------------------------------------------------
 // イベント
