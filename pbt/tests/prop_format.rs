@@ -57,20 +57,9 @@ proptest! {
         prop_assert_eq!(restored, Some(level));
     }
 
-    /// Resolution の yuv420_size は width * height * 3 / 2 に等しい。
+    /// Resolution の yuv420_size は stride * height * 3 / 2 に等しい。
     #[test]
-    fn yuv420_size_formula(width in 2u32..8192, height in 2u32..8192) {
-        // 偶数に正規化
-        let width = width & !1;
-        let height = height & !1;
-        let res = Resolution { width, height };
-        let expected = (width as usize) * (height as usize) * 3 / 2;
-        prop_assert_eq!(res.yuv420_size(), expected);
-    }
-
-    /// stride 付き yuv420_size は stride >= width の場合 stride ベースで計算される。
-    #[test]
-    fn yuv420_size_with_stride(
+    fn yuv420_size_uses_stride(
         width in 2u32..4096,
         height in 2u32..4096,
         extra in 0u32..256,
@@ -78,9 +67,13 @@ proptest! {
         let width = width & !1;
         let height = height & !1;
         let stride = width + (extra & !1);
-        let res = Resolution { width, height };
+        let res = Resolution {
+            width,
+            height,
+            stride,
+        };
         let expected = (stride as usize) * (height as usize)
             + (stride as usize / 2) * (height as usize / 2) * 2;
-        prop_assert_eq!(res.yuv420_size_with_stride(stride), expected);
+        prop_assert_eq!(res.yuv420_size(), expected);
     }
 }

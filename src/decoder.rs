@@ -232,9 +232,19 @@ impl H264Decoder {
         let mut fmt = sys::zeroed_format(sys::V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE);
         sys::ioctl_g_fmt(fd, &mut fmt)?;
 
-        let (width, height) = unsafe { (fmt.fmt.pix_mp.width, fmt.fmt.pix_mp.height) };
+        let (width, height, stride) = unsafe {
+            (
+                fmt.fmt.pix_mp.width,
+                fmt.fmt.pix_mp.height,
+                fmt.fmt.pix_mp.plane_fmt[0].bytesperline,
+            )
+        };
 
-        self.resolution = Some(Resolution { width, height });
+        self.resolution = Some(Resolution {
+            width,
+            height,
+            stride,
+        });
 
         // 新しい CAPTURE バッファを確保
         let capture_buffers = BufferSet::allocate(
