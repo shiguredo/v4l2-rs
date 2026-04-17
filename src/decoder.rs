@@ -236,7 +236,7 @@ impl H264Decoder {
             (
                 fmt.fmt.pix_mp.width,
                 fmt.fmt.pix_mp.height,
-                fmt.fmt.pix_mp.plane_fmt[0].bytesperline
+                fmt.fmt.pix_mp.plane_fmt[0].bytesperline,
             )
         };
 
