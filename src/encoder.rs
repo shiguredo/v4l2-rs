@@ -177,6 +177,13 @@ pub struct EncodedFrame {
     pub timestamp_us: i64,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct ConfiguredOutputFormat {
+    width: u32,
+    height: u32,
+    stride: u32,
+}
+
 /// H.264 ハードウェアエンコーダー。
 ///
 /// フィールド宣言順序は Drop 順序に影響する。
@@ -222,10 +229,11 @@ impl H264Encoder {
             InputMemory::DmaBuf => sys::V4L2_MEMORY_DMABUF,
         };
 
-        Self::set_output_format(fd, config.width, config.height, stride, config.pixel_format)?;
+        let output_format =
+            Self::set_output_format(fd, config.width, config.height, stride, config.pixel_format)?;
 
         // CAPTURE フォーマット設定 (H.264)
-        Self::set_capture_format(fd, config.width, config.height)?;
+        Self::set_capture_format(fd, output_format.width, output_format.height)?;
 
         // OUTPUT バッファ確保
         let output_buffers = BufferSet::allocate(
@@ -261,8 +269,9 @@ impl H264Encoder {
         capture_queue.enqueue_all()?;
 
         let resolution = Resolution {
-            width: config.width,
-            height: config.height,
+            width: output_format.width,
+            height: output_format.height,
+            stride: output_format.stride,
         };
 
         Ok(H264Encoder {
@@ -472,7 +481,7 @@ impl H264Encoder {
         height: u32,
         stride: u32,
         pixel_format: PixelFormat,
-    ) -> crate::error::Result<()> {
+    ) -> crate::error::Result<ConfiguredOutputFormat> {
         let mut fmt = sys::zeroed_format(sys::V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE);
         let pix_mp = unsafe { &mut fmt.fmt.pix_mp };
         pix_mp.width = width;
@@ -483,12 +492,35 @@ impl H264Encoder {
         pix_mp.num_planes = 1;
         pix_mp.plane_fmt[0].bytesperline = stride;
         pix_mp.plane_fmt[0].sizeimage = Resolution {
-            width: stride,
+            width,
             height,
+            stride,
         }
         .yuv420_size() as u32;
 
-        sys::ioctl_s_fmt(fd, &mut fmt)
+        sys::ioctl_s_fmt(fd, &mut fmt)?;
+
+        // S_FMT 後の実際のサイズは変更されることがある。
+        // 以下のコマンドで確認ができる。
+        //
+        // v4l2-ctl -d /dev/video11 -x width=<width>,height=<height>,pixelformat=YU12 --get-fmt-video-out
+        //
+        // Raspberry Pi 4 での測定値は以下の通りだった。
+        // 16x16     => 32x32(64)
+        // 32x32     => 32x32(64)
+        // 160x120   => 160x120(192)
+        // 161x121   => 161x121(192)
+        // 320x180   => 320x180(320)
+        // 321x181   => 321x181(384)
+        // 640x360   => 640x360(640)
+        // 1280x720  => 1280x720(1280)
+        // 1920x1080 => 1920x1080(1920)
+        let pix_mp = unsafe { &fmt.fmt.pix_mp };
+        Ok(ConfiguredOutputFormat {
+            width: pix_mp.width,
+            height: pix_mp.height,
+            stride: pix_mp.plane_fmt[0].bytesperline,
+        })
     }
 
     fn set_capture_format(fd: RawFd, width: u32, height: u32) -> crate::error::Result<()> {

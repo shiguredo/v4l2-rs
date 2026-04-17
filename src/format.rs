@@ -39,28 +39,18 @@ impl PixelFormat {
 pub struct Resolution {
     pub width: u32,
     pub height: u32,
+    pub stride: u32,
 }
 
 impl Resolution {
     /// YUV420 (I420) フレームのバイトサイズを計算する。
     ///
-    /// Y plane: width * height
-    /// U plane: (width/2) * (height/2)
-    /// V plane: (width/2) * (height/2)
-    /// 合計: width * height * 3 / 2
+    /// Y plane: stride * height
+    /// U plane: (stride/2) * (height/2)
+    /// V plane: (stride/2) * (height/2)
     pub fn yuv420_size(&self) -> usize {
-        let w = self.width as usize;
+        let w = self.stride as usize;
         let h = self.height as usize;
         w * h * 3 / 2
-    }
-
-    /// stride を考慮した YUV420 (I420) フレームのバイトサイズを計算する。
-    pub fn yuv420_size_with_stride(&self, stride: u32) -> usize {
-        let s = stride as usize;
-        let h = self.height as usize;
-        // Y plane: stride * height
-        // U plane: (stride/2) * (height/2)
-        // V plane: (stride/2) * (height/2)
-        s * h + (s / 2) * (h / 2) * 2
     }
 }
