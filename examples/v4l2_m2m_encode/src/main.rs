@@ -5,12 +5,14 @@
 use std::fs;
 use std::io::{Seek, SeekFrom, Write};
 use std::num::NonZeroU32;
+use std::sync::mpsc;
+use std::time::Duration;
 
 use shiguredo_mp4::boxes::{Avc1Box, AvccBox, SampleEntry, VisualSampleEntryFields};
 use shiguredo_mp4::mux::{Mp4FileMuxer, MuxError, Sample};
 use shiguredo_mp4::{TrackKind, Uint};
 use shiguredo_v4l2::v4l2_m2m;
-use shiguredo_v4l2::v4l2_m2m::{EncoderConfig, H264Encoder, InputFrame};
+use shiguredo_v4l2::v4l2_m2m::{EncodeCallbackOutput, EncoderConfig, H264Encoder, InputFrame};
 
 const NAL_TYPE_SPS: u8 = 7;
 const NAL_TYPE_PPS: u8 = 8;
@@ -61,6 +63,13 @@ impl From<std::io::Error> for Error {
 }
 
 type Result<T> = std::result::Result<T, Error>;
+
+struct OwnedEncodedFrame {
+    data: Vec<u8>,
+    is_keyframe: bool,
+    timestamp_us: i64,
+    value: u64,
+}
 
 struct Args {
     device: String,
@@ -284,7 +293,19 @@ fn main() -> Result<()> {
 
     let width = config.width;
     let height = config.height;
-    let mut encoder = H264Encoder::new(config)?;
+    let (encode_tx, encode_rx) = mpsc::channel::<std::result::Result<OwnedEncodedFrame, String>>();
+    let mut encoder = H264Encoder::new(config, move |result| {
+        let mapped = match result {
+            Ok(EncodeCallbackOutput::Frame { frame, value }) => Ok(OwnedEncodedFrame {
+                data: frame.data.to_vec(),
+                is_keyframe: frame.is_keyframe,
+                timestamp_us: frame.timestamp_us,
+                value,
+            }),
+            Err(err) => Err(format!("{err}")),
+        };
+        let _ = encode_tx.send(mapped);
+    })?;
 
     let test_frame = generate_test_frame(width, height);
 
@@ -309,7 +330,25 @@ fn main() -> Result<()> {
 
     for i in 0..args.frames {
         let timestamp_us = i as i64 * 33333;
-        let encoded = encoder.encode(InputFrame::I420(&test_frame), timestamp_us, false)?;
+        encoder.encode(InputFrame::I420(&test_frame), timestamp_us, false, i as u64)?;
+        let encoded = match encode_rx.recv_timeout(Duration::from_secs(1)) {
+            Ok(result) => result.map_err(Error::Message)?,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                return Err(Error::Message("encode callback timed out".to_string()));
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(Error::Message(
+                    "encode callback channel disconnected".to_string(),
+                ));
+            }
+        };
+
+        if encoded.value != i as u64 {
+            return Err(Error::Message(format!(
+                "value mismatch: expected {}, got {}",
+                i, encoded.value
+            )));
+        }
 
         let keyframe_str = if encoded.is_keyframe {
             ", keyframe"

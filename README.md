@@ -40,42 +40,69 @@ bcm2835-codec を利用した H.264 ハードウェアエンコード/デコー�
 ### H.264 エンコード
 
 ```rust
-use shiguredo_v4l2::v4l2_m2m::{EncoderConfig, H264Encoder, InputFrame};
+use std::sync::mpsc;
+use std::time::Duration;
+
+use shiguredo_v4l2::v4l2_m2m::{EncodeCallbackOutput, EncoderConfig, H264Encoder, InputFrame};
 
 // エンコーダーを作成する (1280x720, 2Mbps)
 let config = EncoderConfig::new(1280, 720, 2_000_000);
-let mut encoder = H264Encoder::new(config)?;
+let (tx, rx) = mpsc::channel::<(usize, bool, i64, u64)>();
+let mut encoder = H264Encoder::new(config, move |result| match result {
+    Ok(EncodeCallbackOutput::Frame { frame, value }) => {
+        // frame.data はコールバック中のみ有効
+        let _ = tx.send((frame.data.len(), frame.is_keyframe, frame.timestamp_us, value));
+    }
+    Err(err) => {
+        eprintln!("encode error: {err}");
+    }
+})?;
 
-// I420 フレームをエンコードする (初回 encode 呼び出し時に自動で STREAMON される)
+// I420 フレームをエンキューする (初回 encode 呼び出し時に自動で STREAMON される)
 let timestamp_us = 0;
 let force_keyframe = false;
-let frame = encoder.encode(InputFrame::I420(&yuv_data), timestamp_us, force_keyframe)?;
-println!("encoded: {} bytes, keyframe: {}", frame.data.len(), frame.is_keyframe);
+let user_value = 123_u64;
+encoder.encode(InputFrame::I420(&yuv_data), timestamp_us, force_keyframe, user_value)?;
+
+let (bytes, keyframe, out_ts, value) = rx.recv_timeout(Duration::from_secs(1))?;
+println!("encoded: {bytes} bytes, keyframe: {keyframe}, ts={out_ts}, value={value}");
 ```
 
 ### H.264 デコード
 
 ```rust
-use shiguredo_v4l2::v4l2_m2m::{DecodeOutput, DecoderConfig, H264Decoder};
+use std::sync::mpsc;
+use std::time::Duration;
+
+use shiguredo_v4l2::v4l2_m2m::{DecodeCallbackOutput, DecoderConfig, H264Decoder};
 
 // デコーダーを作成する
 let config = DecoderConfig::new();
-let mut decoder = H264Decoder::new(config)?;
+let (tx, rx) = mpsc::channel::<String>();
+let mut decoder = H264Decoder::new(config, move |result| match result {
+    Ok(DecodeCallbackOutput::Frame { frame, value }) => {
+        // frame.data はコールバック中のみ有効
+        let _ = tx.send(format!(
+            "decoded: {} bytes, ts={}, value={value}",
+            frame.data.len(),
+            frame.timestamp_us
+        ));
+    }
+    Ok(DecodeCallbackOutput::ResolutionChanged { width, height }) => {
+        let _ = tx.send(format!("resolution changed: {width}x{height}"));
+    }
+    Err(err) => {
+        eprintln!("decode error: {err}");
+    }
+})?;
 
-// H.264 データをデコードする
+// H.264 データをデコードキューへ投入する
 let timestamp_us = 0;
-match decoder.decode(&h264_data, timestamp_us)? {
-    DecodeOutput::Frame(frame) => {
-        println!("decoded: {} bytes", frame.data.len());
-        // フレーム使用後にバッファを解放する
-        decoder.release_buffer(frame.index)?;
-    }
-    DecodeOutput::ResolutionChanged { width, height } => {
-        println!("resolution changed: {width}x{height}");
-    }
-    DecodeOutput::Pending => {
-        // バッファリング中。まだフレームが出力されていない
-    }
+let user_value = 456_u64;
+decoder.decode(&h264_data, timestamp_us, user_value)?;
+
+if let Ok(message) = rx.recv_timeout(Duration::from_secs(1)) {
+    println!("{message}");
 }
 ```
 
@@ -89,9 +116,9 @@ use shiguredo_v4l2::v4l2_m2m::{EncoderConfig, H264Encoder, InputFrame, InputMemo
 let mut config = EncoderConfig::new(1920, 1080, 4_000_000);
 config.input_memory = InputMemory::DmaBuf;
 
-let mut encoder = H264Encoder::new(config)?;
+let mut encoder = H264Encoder::new(config, |_| {})?;
 
-let frame = encoder.encode(
+encoder.encode(
     InputFrame::DmaBuf {
         fd: dmabuf_fd,
         bytesused: frame_size as u32,
@@ -99,6 +126,7 @@ let frame = encoder.encode(
     },
     timestamp_us,
     false,
+    999_u64,
 )?;
 ```
 

@@ -1,12 +1,11 @@
 //! V4L2 ポーリングスレッド。
 //!
 //! C++ の `V4L2Runner` に相当する。
-//! `poll()` でイベントを監視し、`mpsc::channel` で通知する。
+//! `poll()` でイベントを監視し、エンコーダー/デコーダーへ直接通知する。
 
 use std::os::fd::RawFd;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc;
 use std::thread::{self, JoinHandle};
 
 use crate::sys;
@@ -48,31 +47,26 @@ pub(crate) struct PollerConfig {
 /// ポーリングスレッド。
 pub(crate) struct Poller {
     thread: Option<JoinHandle<()>>,
-    event_rx: mpsc::Receiver<PollEvent>,
     abort: Arc<AtomicBool>,
 }
 
 impl Poller {
     /// ポーリングスレッドを起動する。
-    pub fn start(config: PollerConfig) -> Self {
-        let (event_tx, event_rx) = mpsc::channel();
+    pub fn start<F>(config: PollerConfig, on_event: F) -> Self
+    where
+        F: FnMut(PollEvent) + Send + 'static,
+    {
         let abort = Arc::new(AtomicBool::new(false));
         let abort_clone = abort.clone();
 
         let thread = thread::spawn(move || {
-            Self::poll_loop(config, event_tx, abort_clone);
+            Self::poll_loop(config, on_event, abort_clone);
         });
 
         Poller {
             thread: Some(thread),
-            event_rx,
             abort,
         }
-    }
-
-    /// イベントを受信する (タイムアウト付き)。
-    pub fn recv_timeout(&self, timeout: std::time::Duration) -> Option<PollEvent> {
-        self.event_rx.recv_timeout(timeout).ok()
     }
 
     /// ポーリングスレッドを停止する。
@@ -83,8 +77,11 @@ impl Poller {
         }
     }
 
-    fn poll_loop(config: PollerConfig, event_tx: mpsc::Sender<PollEvent>, abort: Arc<AtomicBool>) {
-        let mut poll_events = libc::POLLIN;
+    fn poll_loop<F>(config: PollerConfig, mut on_event: F, abort: Arc<AtomicBool>)
+    where
+        F: FnMut(PollEvent),
+    {
+        let mut poll_events = libc::POLLIN | libc::POLLOUT;
         if config.subscribe_events {
             poll_events |= libc::POLLPRI;
         }
@@ -111,21 +108,55 @@ impl Poller {
                 if err.kind() == std::io::ErrorKind::Interrupted {
                     continue;
                 }
-                let _ = event_tx.send(PollEvent::Error(crate::error::Error::Poll { source: err }));
+                on_event(PollEvent::Error(crate::error::Error::Poll { source: err }));
                 return;
             }
 
             if ret == 0 {
-                // タイムアウト
                 continue;
             }
 
-            // イベント処理 (POLLPRI)
-            if pollfd.revents & libc::POLLPRI != 0 {
-                let mut event: sys::v4l2_event = unsafe { std::mem::zeroed() };
-                if sys::ioctl_dqevent(config.fd, &mut event).is_ok()
-                    && event.r#type == sys::V4L2_EVENT_SOURCE_CHANGE
-                {
+            if pollfd.revents & libc::POLLPRI != 0
+                && let Err(err) = Self::handle_source_event(&config, &mut on_event, &abort)
+            {
+                on_event(PollEvent::Error(err));
+                return;
+            }
+
+            // OUTPUT は POLLOUT のときのみ DQBUF する。
+            if pollfd.revents & libc::POLLOUT != 0
+                && let Err(err) = Self::process_output(&config, &mut on_event, &abort)
+            {
+                on_event(PollEvent::Error(err));
+                return;
+            }
+
+            // CAPTURE は POLLIN のときのみ DQBUF する。
+            if pollfd.revents & libc::POLLIN != 0
+                && let Err(err) = Self::process_capture(&config, &mut on_event, &abort)
+            {
+                on_event(PollEvent::Error(err));
+                return;
+            }
+        }
+    }
+
+    fn handle_source_event<F>(
+        config: &PollerConfig,
+        on_event: &mut F,
+        abort: &AtomicBool,
+    ) -> crate::error::Result<()>
+    where
+        F: FnMut(PollEvent),
+    {
+        if abort.load(Ordering::Acquire) {
+            return Ok(());
+        }
+
+        let mut event: sys::v4l2_event = unsafe { std::mem::zeroed() };
+        match sys::ioctl_dqevent(config.fd, &mut event) {
+            Ok(()) => {
+                if event.r#type == sys::V4L2_EVENT_SOURCE_CHANGE {
                     // event.u の先頭 4 バイトが v4l2_event_src_change.changes
                     let changes = u32::from_ne_bytes([
                         event.u.data[0],
@@ -133,34 +164,60 @@ impl Poller {
                         event.u.data[2],
                         event.u.data[3],
                     ]);
-                    if changes & sys::V4L2_EVENT_SRC_CH_RESOLUTION != 0
-                        && event_tx.send(PollEvent::SourceChanged).is_err()
-                    {
-                        return;
+                    if changes & sys::V4L2_EVENT_SRC_CH_RESOLUTION != 0 {
+                        on_event(PollEvent::SourceChanged);
                     }
                 }
+                Ok(())
             }
-
-            // データ処理 (POLLIN)
-            if pollfd.revents & libc::POLLIN != 0 {
-                // OUTPUT バッファのデキュー
-                Self::try_dequeue_output(&config, &event_tx, &abort);
-
-                // CAPTURE バッファのデキュー
-                Self::try_dequeue_capture(&config, &event_tx, &abort);
+            Err(crate::error::Error::Ioctl { source, .. })
+                if source.raw_os_error() == Some(libc::EAGAIN) =>
+            {
+                Ok(())
             }
+            Err(err) => Err(err),
         }
     }
 
-    fn try_dequeue_output(
+    fn process_output<F>(
         config: &PollerConfig,
-        event_tx: &mpsc::Sender<PollEvent>,
+        on_event: &mut F,
         abort: &AtomicBool,
-    ) {
+    ) -> crate::error::Result<()>
+    where
+        F: FnMut(PollEvent),
+    {
         if abort.load(Ordering::Acquire) {
-            return;
+            return Ok(());
         }
 
+        if let Some(event) = Self::try_dequeue_output(config)? {
+            on_event(event);
+        }
+
+        Ok(())
+    }
+
+    fn process_capture<F>(
+        config: &PollerConfig,
+        on_event: &mut F,
+        abort: &AtomicBool,
+    ) -> crate::error::Result<()>
+    where
+        F: FnMut(PollEvent),
+    {
+        if abort.load(Ordering::Acquire) {
+            return Ok(());
+        }
+
+        if let Some(event) = Self::try_dequeue_capture(config)? {
+            on_event(event);
+        }
+
+        Ok(())
+    }
+
+    fn try_dequeue_output(config: &PollerConfig) -> crate::error::Result<Option<PollEvent>> {
         let mut plane = sys::v4l2_plane {
             bytesused: 0,
             length: 0,
@@ -175,20 +232,18 @@ impl Poller {
             planes: &mut plane as *mut _,
         };
 
-        if sys::ioctl_dqbuf(config.fd, &mut buf).is_ok() {
-            let _ = event_tx.send(PollEvent::OutputDequeued { index: buf.index });
+        match sys::ioctl_dqbuf(config.fd, &mut buf) {
+            Ok(()) => Ok(Some(PollEvent::OutputDequeued { index: buf.index })),
+            Err(crate::error::Error::Ioctl { source, .. })
+                if source.raw_os_error() == Some(libc::EAGAIN) =>
+            {
+                Ok(None)
+            }
+            Err(err) => Err(err),
         }
     }
 
-    fn try_dequeue_capture(
-        config: &PollerConfig,
-        event_tx: &mpsc::Sender<PollEvent>,
-        abort: &AtomicBool,
-    ) {
-        if abort.load(Ordering::Acquire) {
-            return;
-        }
-
+    fn try_dequeue_capture(config: &PollerConfig) -> crate::error::Result<Option<PollEvent>> {
         let mut plane = sys::v4l2_plane {
             bytesused: 0,
             length: 0,
@@ -203,8 +258,8 @@ impl Poller {
             planes: &mut plane as *mut _,
         };
 
-        if sys::ioctl_dqbuf(config.fd, &mut buf).is_ok() {
-            let _ = event_tx.send(PollEvent::CaptureDequeued {
+        match sys::ioctl_dqbuf(config.fd, &mut buf) {
+            Ok(()) => Ok(Some(PollEvent::CaptureDequeued {
                 index: buf.index,
                 bytesused: plane.bytesused,
                 flags: buf.flags,
@@ -212,7 +267,13 @@ impl Poller {
                     tv_sec: buf.timestamp.tv_sec,
                     tv_usec: buf.timestamp.tv_usec,
                 },
-            });
+            })),
+            Err(crate::error::Error::Ioctl { source, .. })
+                if source.raw_os_error() == Some(libc::EAGAIN) =>
+            {
+                Ok(None)
+            }
+            Err(err) => Err(err),
         }
     }
 }

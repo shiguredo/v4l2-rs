@@ -16,7 +16,7 @@ use shiguredo_libcamera::{
 use shiguredo_mp4::boxes::{Avc1Box, AvccBox, SampleEntry, VisualSampleEntryFields};
 use shiguredo_mp4::mux::{Mp4FileMuxer, MuxError, Sample};
 use shiguredo_mp4::{TrackKind, Uint};
-use shiguredo_v4l2::v4l2_m2m::{EncoderConfig, H264Encoder, InputFrame};
+use shiguredo_v4l2::v4l2_m2m::{EncodeCallbackOutput, EncoderConfig, H264Encoder, InputFrame};
 
 const NAL_TYPE_SPS: u8 = 7;
 const NAL_TYPE_PPS: u8 = 8;
@@ -78,6 +78,12 @@ impl From<std::io::Error> for Error {
 }
 
 type Result<T> = std::result::Result<T, Error>;
+
+struct OwnedEncodedFrame {
+    data: Vec<u8>,
+    is_keyframe: bool,
+    value: u64,
+}
 
 struct Args {
     duration: u64,
@@ -346,7 +352,18 @@ fn main() -> Result<()> {
         stride,
         ..EncoderConfig::new(actual_width, actual_height, args.bitrate_kbps * 1000)
     };
-    let mut encoder = H264Encoder::new(encoder_config)?;
+    let (encode_tx, encode_rx) = mpsc::channel::<std::result::Result<OwnedEncodedFrame, String>>();
+    let mut encoder = H264Encoder::new(encoder_config, move |result| {
+        let mapped = match result {
+            Ok(EncodeCallbackOutput::Frame { frame, value }) => Ok(OwnedEncodedFrame {
+                data: frame.data.to_vec(),
+                is_keyframe: frame.is_keyframe,
+                value,
+            }),
+            Err(err) => Err(format!("{err}")),
+        };
+        let _ = encode_tx.send(mapped);
+    })?;
     println!("エンコーダー初期化完了: デバイス={}", args.encoder_device);
 
     // 9. FrameBufferAllocator
@@ -442,8 +459,30 @@ fn main() -> Result<()> {
                     vec
                 };
 
-                let encoded =
-                    encoder.encode(InputFrame::I420(&frame_data), timestamp_us as i64, false)?;
+                encoder.encode(
+                    InputFrame::I420(&frame_data),
+                    timestamp_us as i64,
+                    false,
+                    timestamp_us,
+                )?;
+                let encoded = match encode_rx.recv_timeout(Duration::from_secs(1)) {
+                    Ok(result) => result.map_err(Error::Message)?,
+                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                        return Err(Error::Message("encode callback timed out".to_string()));
+                    }
+                    Err(mpsc::RecvTimeoutError::Disconnected) => {
+                        return Err(Error::Message(
+                            "encode callback channel disconnected".to_string(),
+                        ));
+                    }
+                };
+
+                if encoded.value != timestamp_us {
+                    return Err(Error::Message(format!(
+                        "encode value mismatch: expected {}, got {}",
+                        timestamp_us, encoded.value
+                    )));
+                }
 
                 let nals = split_nal_units(&encoded.data);
                 let avcc_data = nals_to_avcc(&nals);
