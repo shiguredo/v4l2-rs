@@ -1,7 +1,7 @@
 //! H.264 ハードウェアエンコーダー。
 //!
 //! V4L2 M2M デバイス (`/dev/video11`) を使用して
-//! I420 フレームを H.264 にエンコードする。
+//! I420 / NV12 フレームを H.264 にエンコードする。
 
 use std::collections::VecDeque;
 use std::os::fd::RawFd;
@@ -9,8 +9,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::buffer::BufferSet;
 use crate::device::Device;
-use crate::format::{PixelFormat, Resolution};
-use crate::poller::{PollEvent, Poller, PollerConfig};
+use crate::format::{Memory, PixelFormat, Resolution};
+use crate::poller::{PollEvent, Poller, PollerConfig, Timestamp};
 use crate::queue::{CaptureQueue, OutputQueue};
 use crate::sys;
 
@@ -94,15 +94,6 @@ impl H264Level {
     }
 }
 
-/// エンコーダーへの入力メモリ方式。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InputMemory {
-    /// mmap によるコピー入力。
-    Mmap,
-    /// DMABUF によるゼロコピー入力。
-    DmaBuf,
-}
-
 /// エンコーダーの設定。
 pub struct EncoderConfig {
     /// デバイスパス。デフォルト: "/dev/video11"。
@@ -128,7 +119,9 @@ pub struct EncoderConfig {
     /// CAPTURE バッファ数。デフォルト: 4。
     pub capture_buffer_count: u32,
     /// 入力メモリ方式。デフォルト: Mmap。
-    pub input_memory: InputMemory,
+    pub input_memory: Memory,
+    /// 出力メモリ方式。デフォルト: Mmap。
+    pub output_memory: Memory,
     /// 入力ピクセルフォーマット。デフォルト: Yuv420 (I420)。
     pub pixel_format: PixelFormat,
 }
@@ -148,18 +141,17 @@ impl EncoderConfig {
             bitrate_bps,
             output_buffer_count: 4,
             capture_buffer_count: 4,
-            input_memory: InputMemory::Mmap,
+            input_memory: Memory::Mmap,
+            output_memory: Memory::Mmap,
             pixel_format: PixelFormat::Yuv420,
         }
     }
 }
 
-/// エンコーダーへの入力フレーム。
-pub enum InputFrame<'a> {
-    /// I420 データのスライス。
-    I420(&'a [u8]),
-    /// NV12 データのスライス。
-    NV12(&'a [u8]),
+/// エンコーダーへの入力。
+pub enum EncodeInput<'a> {
+    /// MMAP 入力データ。
+    Mmap(&'a [u8]),
     /// DMABUF ファイルディスクリプタ。
     DmaBuf {
         fd: RawFd,
@@ -168,24 +160,122 @@ pub enum InputFrame<'a> {
     },
 }
 
+struct RequeueToken {
+    capture_queue: Arc<CaptureQueue>,
+    index: u32,
+    pending_async_errors: Arc<Mutex<VecDeque<crate::error::Error>>>,
+}
+
+impl RequeueToken {
+    fn requeue(self) {
+        if let Err(err) = self.capture_queue.enqueue(self.index)
+            && let Ok(mut pending) = self.pending_async_errors.lock()
+        {
+            pending.push_back(err);
+        }
+    }
+}
+
 /// エンコードされた H.264 フレーム。
-pub struct EncodedFrame<'a> {
-    /// H.264 NAL データ。
-    pub data: &'a [u8],
-    /// キーフレームかどうか。
-    pub is_keyframe: bool,
-    /// タイムスタンプ (マイクロ秒)。
-    pub timestamp_us: i64,
+///
+/// このハンドルが `Drop` されると、内部 CAPTURE バッファが自動再キューされる。
+pub struct EncodedFrame {
+    requeue: Option<RequeueToken>,
+    index: u32,
+    bytesused: u32,
+    is_keyframe: bool,
+    timestamp_us: i64,
+}
+
+impl EncodedFrame {
+    fn new(
+        capture_queue: Arc<CaptureQueue>,
+        pending_async_errors: Arc<Mutex<VecDeque<crate::error::Error>>>,
+        index: u32,
+        bytesused: u32,
+        flags: u32,
+        timestamp: Timestamp,
+    ) -> crate::error::Result<Self> {
+        let capacity = capture_queue.buffers().plane(index, 0).length as usize;
+        let bytesused_usize = bytesused as usize;
+        if bytesused_usize > capacity {
+            return Err(crate::error::Error::InputTooLarge {
+                size: bytesused_usize,
+                capacity,
+            });
+        }
+
+        Ok(Self {
+            requeue: Some(RequeueToken {
+                capture_queue,
+                index,
+                pending_async_errors,
+            }),
+            index,
+            bytesused,
+            is_keyframe: flags & sys::V4L2_BUF_FLAG_KEYFRAME != 0,
+            timestamp_us: timestamp.tv_sec * 1_000_000 + timestamp.tv_usec,
+        })
+    }
+
+    /// MMAP 出力時のデータ参照を返す。DMABUF 出力時は `None`。
+    pub fn data(&self) -> Option<&[u8]> {
+        let token = self.requeue.as_ref()?;
+        let data = token.capture_queue.buffers().mmap_slice(self.index, 0)?;
+        Some(&data[..self.bytesused as usize])
+    }
+
+    /// DMABUF 出力時の fd を返す。MMAP 出力時は `None`。
+    pub fn dmabuf_fd(&self) -> Option<RawFd> {
+        self.requeue
+            .as_ref()
+            .and_then(|token| token.capture_queue.buffers().dmabuf_fd(self.index, 0))
+    }
+
+    /// バッファインデックスを返す。
+    pub fn index(&self) -> u32 {
+        self.index
+    }
+
+    /// `bytesused` を返す。
+    pub fn bytesused(&self) -> u32 {
+        self.bytesused
+    }
+
+    /// バッファ長を返す。
+    pub fn length(&self) -> u32 {
+        self.requeue
+            .as_ref()
+            .map(|token| token.capture_queue.buffers().plane(self.index, 0).length)
+            .unwrap_or(0)
+    }
+
+    /// キーフレームかどうかを返す。
+    pub fn is_keyframe(&self) -> bool {
+        self.is_keyframe
+    }
+
+    /// タイムスタンプ (マイクロ秒) を返す。
+    pub fn timestamp_us(&self) -> i64 {
+        self.timestamp_us
+    }
+}
+
+impl Drop for EncodedFrame {
+    fn drop(&mut self) {
+        if let Some(token) = self.requeue.take() {
+            token.requeue();
+        }
+    }
 }
 
 /// エンコーダーのコールバック出力。
-pub enum EncodeCallbackOutput<'a, T> {
+pub enum EncodeCallbackOutput<T> {
     /// エンコードされたフレーム。
-    Frame { frame: EncodedFrame<'a>, value: T },
+    Frame { frame: EncodedFrame, value: T },
 }
 
-type EncoderCallback<T> =
-    dyn for<'a> FnMut(crate::error::Result<EncodeCallbackOutput<'a, T>>) + Send;
+type EncoderCallback<T> = dyn FnMut(crate::error::Result<EncodeCallbackOutput<T>>) + Send;
 
 #[derive(Debug, Clone, Copy)]
 struct ConfiguredOutputFormat {
@@ -194,74 +284,39 @@ struct ConfiguredOutputFormat {
     stride: u32,
 }
 
-struct EncoderState<T> {
+struct EncoderRuntime<T> {
     output_queue: OutputQueue,
-    capture_queue: CaptureQueue,
+    capture_queue: Arc<CaptureQueue>,
     resolution: Resolution,
     output_memory: u32,
     started: bool,
     pending_values: VecDeque<T>,
-    callback: Box<EncoderCallback<T>>,
 }
 
-impl<T> EncoderState<T> {
-    fn handle_event(&mut self, event: PollEvent) {
-        match event {
-            PollEvent::OutputDequeued { index } => {
-                self.output_queue.return_buffer(index);
-            }
-            PollEvent::CaptureDequeued {
-                index,
-                bytesused,
-                flags,
-                timestamp,
-            } => {
-                let value = match self.pending_values.pop_front() {
-                    Some(value) => value,
-                    None => {
-                        (self.callback)(Err(crate::error::Error::NoAvailableBuffer));
-                        let _ = self.capture_queue.enqueue(index);
-                        return;
-                    }
-                };
+struct EncoderShared<T> {
+    runtime: Mutex<EncoderRuntime<T>>,
+    callback: Mutex<Box<EncoderCallback<T>>>,
+    pending_async_errors: Arc<Mutex<VecDeque<crate::error::Error>>>,
+}
 
-                let data = match self.capture_queue.buffers().mmap_slice(index, 0) {
-                    Some(data) => data,
-                    None => {
-                        (self.callback)(Err(crate::error::Error::NoAvailableBuffer));
-                        let _ = self.capture_queue.enqueue(index);
-                        return;
-                    }
-                };
+impl<T> EncoderShared<T> {
+    fn emit_callback(&self, output: crate::error::Result<EncodeCallbackOutput<T>>) {
+        if let Ok(mut callback) = self.callback.lock() {
+            (callback)(output);
+        }
+    }
 
-                let bytesused = bytesused as usize;
-                if bytesused > data.len() {
-                    (self.callback)(Err(crate::error::Error::InputTooLarge {
-                        size: bytesused,
-                        capacity: data.len(),
-                    }));
-                    let _ = self.capture_queue.enqueue(index);
-                    return;
-                }
+    fn emit_error(&self, err: crate::error::Error) {
+        self.emit_callback(Err(err));
+    }
 
-                let frame = EncodedFrame {
-                    data: &data[..bytesused],
-                    is_keyframe: flags & sys::V4L2_BUF_FLAG_KEYFRAME != 0,
-                    timestamp_us: timestamp.tv_sec * 1_000_000 + timestamp.tv_usec,
-                };
-
-                (self.callback)(Ok(EncodeCallbackOutput::Frame { frame, value }));
-
-                if let Err(err) = self.capture_queue.enqueue(index) {
-                    (self.callback)(Err(err));
-                }
-            }
-            PollEvent::Error(err) => {
-                (self.callback)(Err(err));
-            }
-            PollEvent::SourceChanged => {
-                // エンコーダーでは発生しない。
-            }
+    fn emit_pending_async_errors(&self) {
+        let mut errors = Vec::new();
+        if let Ok(mut pending) = self.pending_async_errors.lock() {
+            errors.extend(pending.drain(..));
+        }
+        for err in errors {
+            self.emit_error(err);
         }
     }
 }
@@ -272,7 +327,7 @@ impl<T> EncoderState<T> {
 /// `device` (fd) はキューやポーラーより後に Drop されなければならない。
 pub struct H264Encoder<T> {
     poller: Option<Poller>,
-    state: Arc<Mutex<EncoderState<T>>>,
+    shared: Arc<EncoderShared<T>>,
     device: Device,
 }
 
@@ -280,7 +335,7 @@ impl<T: Send + 'static> H264Encoder<T> {
     /// エンコーダーを初期化する。
     pub fn new<F>(config: EncoderConfig, callback: F) -> crate::error::Result<Self>
     where
-        F: for<'a> FnMut(crate::error::Result<EncodeCallbackOutput<'a, T>>) + Send + 'static,
+        F: FnMut(crate::error::Result<EncodeCallbackOutput<T>>) + Send + 'static,
     {
         let device = Device::open(&config.device_path)?;
         let fd = device.raw_fd();
@@ -305,10 +360,7 @@ impl<T: Send + 'static> H264Encoder<T> {
         Self::set_controls(fd, &config)?;
 
         // OUTPUT フォーマット設定
-        let output_memory = match config.input_memory {
-            InputMemory::Mmap => sys::V4L2_MEMORY_MMAP,
-            InputMemory::DmaBuf => sys::V4L2_MEMORY_DMABUF,
-        };
+        let output_memory = config.input_memory.to_v4l2();
 
         let output_format =
             Self::set_output_format(fd, config.width, config.height, stride, config.pixel_format)?;
@@ -332,19 +384,20 @@ impl<T: Send + 'static> H264Encoder<T> {
         );
 
         // CAPTURE バッファ確保
+        let export_capture_dmabuf = matches!(config.output_memory, Memory::DmaBuf);
         let capture_buffers = BufferSet::allocate(
             fd,
             sys::V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE,
             sys::V4L2_MEMORY_MMAP,
             config.capture_buffer_count,
-            false,
+            export_capture_dmabuf,
         )?;
-        let mut capture_queue = CaptureQueue::new(
+        let capture_queue = Arc::new(CaptureQueue::new(
             fd,
             sys::V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE,
             sys::V4L2_MEMORY_MMAP,
             capture_buffers,
-        );
+        ));
 
         // 全 CAPTURE バッファを QBUF
         capture_queue.enqueue_all()?;
@@ -355,19 +408,24 @@ impl<T: Send + 'static> H264Encoder<T> {
             stride: output_format.stride,
         };
 
-        let state = EncoderState {
+        let runtime = EncoderRuntime {
             output_queue,
             capture_queue,
             resolution,
             output_memory,
             started: false,
             pending_values: VecDeque::new(),
-            callback: Box::new(callback),
         };
+
+        let shared = Arc::new(EncoderShared {
+            runtime: Mutex::new(runtime),
+            callback: Mutex::new(Box::new(callback)),
+            pending_async_errors: Arc::new(Mutex::new(VecDeque::new())),
+        });
 
         Ok(H264Encoder {
             poller: None,
-            state: Arc::new(Mutex::new(state)),
+            shared,
             device,
         })
     }
@@ -375,7 +433,7 @@ impl<T: Send + 'static> H264Encoder<T> {
     /// フレームをエンキューする。
     pub fn encode(
         &mut self,
-        frame: InputFrame<'_>,
+        frame: EncodeInput<'_>,
         timestamp_us: i64,
         force_keyframe: bool,
         value: T,
@@ -389,22 +447,24 @@ impl<T: Send + 'static> H264Encoder<T> {
 
         let mut needs_start = false;
         {
-            let mut state = self.lock_state()?;
+            let mut runtime = self.lock_runtime()?;
 
-            let output_index = state
+            let output_index = runtime
                 .output_queue
                 .dequeue_available()
                 .ok_or(crate::error::Error::NoAvailableBuffer)?;
 
             let enqueue_result = match frame {
-                InputFrame::I420(data) | InputFrame::NV12(data) => {
-                    state.output_queue.enqueue(output_index, data, timestamp_us)
+                EncodeInput::Mmap(data) => {
+                    runtime
+                        .output_queue
+                        .enqueue(output_index, data, timestamp_us)
                 }
-                InputFrame::DmaBuf {
+                EncodeInput::DmaBuf {
                     fd: dmabuf_fd,
                     bytesused,
                     length,
-                } => state.output_queue.enqueue_dmabuf(
+                } => runtime.output_queue.enqueue_dmabuf(
                     output_index,
                     dmabuf_fd,
                     bytesused,
@@ -414,17 +474,17 @@ impl<T: Send + 'static> H264Encoder<T> {
             };
 
             if let Err(err) = enqueue_result {
-                state.output_queue.return_buffer(output_index);
+                runtime.output_queue.return_buffer(output_index);
                 return Err(err);
             }
 
-            state.pending_values.push_back(value);
+            runtime.pending_values.push_back(value);
 
-            if !state.started {
+            if !runtime.started {
                 // 順序: OUTPUT QBUF → OUTPUT STREAMON → CAPTURE STREAMON
                 sys::ioctl_streamon(fd, sys::V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE)?;
                 sys::ioctl_streamon(fd, sys::V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE)?;
-                state.started = true;
+                runtime.started = true;
                 needs_start = true;
             }
         }
@@ -459,8 +519,8 @@ impl<T: Send + 'static> H264Encoder<T> {
 
     /// 現在の解像度を取得する。
     pub fn resolution(&self) -> Resolution {
-        match self.state.lock() {
-            Ok(state) => state.resolution,
+        match self.shared.runtime.lock() {
+            Ok(runtime) => runtime.resolution,
             Err(_) => Resolution {
                 width: 0,
                 height: 0,
@@ -469,8 +529,9 @@ impl<T: Send + 'static> H264Encoder<T> {
         }
     }
 
-    fn lock_state(&self) -> crate::error::Result<MutexGuard<'_, EncoderState<T>>> {
-        self.state
+    fn lock_runtime(&self) -> crate::error::Result<MutexGuard<'_, EncoderRuntime<T>>> {
+        self.shared
+            .runtime
             .lock()
             .map_err(|_| crate::error::Error::PollerAborted)
     }
@@ -481,12 +542,12 @@ impl<T: Send + 'static> H264Encoder<T> {
         }
 
         let fd = self.device.raw_fd();
-        let output_memory = match self.state.lock() {
-            Ok(state) => state.output_memory,
+        let output_memory = match self.shared.runtime.lock() {
+            Ok(runtime) => runtime.output_memory,
             Err(_) => return,
         };
 
-        let state = self.state.clone();
+        let shared = self.shared.clone();
         self.poller = Some(Poller::start(
             PollerConfig {
                 fd,
@@ -496,12 +557,82 @@ impl<T: Send + 'static> H264Encoder<T> {
                 capture_memory: sys::V4L2_MEMORY_MMAP,
                 subscribe_events: false,
             },
-            move |event| {
-                if let Ok(mut state) = state.lock() {
-                    state.handle_event(event);
-                }
-            },
+            move |event| Self::handle_event(&shared, event),
         ));
+    }
+
+    fn handle_event(shared: &Arc<EncoderShared<T>>, event: PollEvent) {
+        shared.emit_pending_async_errors();
+
+        match event {
+            PollEvent::OutputDequeued { index } => {
+                if let Ok(mut runtime) = shared.runtime.lock() {
+                    runtime.output_queue.return_buffer(index);
+                } else {
+                    shared.emit_error(crate::error::Error::PollerAborted);
+                }
+            }
+            PollEvent::CaptureDequeued {
+                index,
+                bytesused,
+                flags,
+                timestamp,
+            } => Self::handle_capture(shared, index, bytesused, flags, timestamp),
+            PollEvent::Error(err) => shared.emit_error(err),
+            PollEvent::SourceChanged => {
+                // エンコーダーでは発生しない。
+            }
+        }
+    }
+
+    fn handle_capture(
+        shared: &Arc<EncoderShared<T>>,
+        index: u32,
+        bytesused: u32,
+        flags: u32,
+        timestamp: Timestamp,
+    ) {
+        let (capture_queue, pending_value) = match shared.runtime.lock() {
+            Ok(mut runtime) => {
+                let Some(value) = runtime.pending_values.pop_front() else {
+                    let capture_queue = runtime.capture_queue.clone();
+                    drop(runtime);
+                    shared.emit_error(crate::error::Error::NoAvailableBuffer);
+                    if let Err(err) = capture_queue.enqueue(index) {
+                        shared.emit_error(err);
+                    }
+                    return;
+                };
+                (runtime.capture_queue.clone(), value)
+            }
+            Err(_) => {
+                shared.emit_error(crate::error::Error::PollerAborted);
+                return;
+            }
+        };
+
+        let frame = match EncodedFrame::new(
+            capture_queue.clone(),
+            shared.pending_async_errors.clone(),
+            index,
+            bytesused,
+            flags,
+            timestamp,
+        ) {
+            Ok(frame) => frame,
+            Err(err) => {
+                shared.emit_error(err);
+                if let Err(requeue_err) = capture_queue.enqueue(index) {
+                    shared.emit_error(requeue_err);
+                }
+                return;
+            }
+        };
+
+        shared.emit_callback(Ok(EncodeCallbackOutput::Frame {
+            frame,
+            value: pending_value,
+        }));
     }
 
     fn set_controls(fd: RawFd, config: &EncoderConfig) -> crate::error::Result<()> {
@@ -612,12 +743,12 @@ impl<T> Drop for H264Encoder<T> {
         self.poller = None;
 
         let fd = self.device.raw_fd();
-        if let Ok(mut state) = self.state.lock()
-            && state.started
+        if let Ok(mut runtime) = self.shared.runtime.lock()
+            && runtime.started
         {
             let _ = sys::ioctl_streamoff(fd, sys::V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE);
             let _ = sys::ioctl_streamoff(fd, sys::V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE);
-            state.started = false;
+            runtime.started = false;
         }
     }
 }

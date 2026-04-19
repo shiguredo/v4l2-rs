@@ -12,7 +12,7 @@ use shiguredo_mp4::boxes::{Avc1Box, AvccBox, SampleEntry, VisualSampleEntryField
 use shiguredo_mp4::mux::{Mp4FileMuxer, MuxError, Sample};
 use shiguredo_mp4::{TrackKind, Uint};
 use shiguredo_v4l2::v4l2_m2m;
-use shiguredo_v4l2::v4l2_m2m::{EncodeCallbackOutput, EncoderConfig, H264Encoder, InputFrame};
+use shiguredo_v4l2::v4l2_m2m::{EncodeCallbackOutput, EncodeInput, EncoderConfig, H264Encoder};
 
 const NAL_TYPE_SPS: u8 = 7;
 const NAL_TYPE_PPS: u8 = 8;
@@ -296,12 +296,15 @@ fn main() -> Result<()> {
     let (encode_tx, encode_rx) = mpsc::channel::<std::result::Result<OwnedEncodedFrame, String>>();
     let mut encoder = H264Encoder::new(config, move |result| {
         let mapped = match result {
-            Ok(EncodeCallbackOutput::Frame { frame, value }) => Ok(OwnedEncodedFrame {
-                data: frame.data.to_vec(),
-                is_keyframe: frame.is_keyframe,
-                timestamp_us: frame.timestamp_us,
-                value,
-            }),
+            Ok(EncodeCallbackOutput::Frame { frame, value }) => match frame.data() {
+                Some(data) => Ok(OwnedEncodedFrame {
+                    data: data.to_vec(),
+                    is_keyframe: frame.is_keyframe(),
+                    timestamp_us: frame.timestamp_us(),
+                    value,
+                }),
+                None => Err("encoder output is DMABUF in this sample".to_string()),
+            },
             Err(err) => Err(format!("{err}")),
         };
         let _ = encode_tx.send(mapped);
@@ -330,7 +333,12 @@ fn main() -> Result<()> {
 
     for i in 0..args.frames {
         let timestamp_us = i as i64 * 33333;
-        encoder.encode(InputFrame::I420(&test_frame), timestamp_us, false, i as u64)?;
+        encoder.encode(
+            EncodeInput::Mmap(&test_frame),
+            timestamp_us,
+            false,
+            i as u64,
+        )?;
         let encoded = match encode_rx.recv_timeout(Duration::from_secs(1)) {
             Ok(result) => result.map_err(Error::Message)?,
             Err(mpsc::RecvTimeoutError::Timeout) => {

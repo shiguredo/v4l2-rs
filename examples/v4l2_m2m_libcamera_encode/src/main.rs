@@ -16,7 +16,7 @@ use shiguredo_libcamera::{
 use shiguredo_mp4::boxes::{Avc1Box, AvccBox, SampleEntry, VisualSampleEntryFields};
 use shiguredo_mp4::mux::{Mp4FileMuxer, MuxError, Sample};
 use shiguredo_mp4::{TrackKind, Uint};
-use shiguredo_v4l2::v4l2_m2m::{EncodeCallbackOutput, EncoderConfig, H264Encoder, InputFrame};
+use shiguredo_v4l2::v4l2_m2m::{EncodeCallbackOutput, EncodeInput, EncoderConfig, H264Encoder};
 
 const NAL_TYPE_SPS: u8 = 7;
 const NAL_TYPE_PPS: u8 = 8;
@@ -355,11 +355,14 @@ fn main() -> Result<()> {
     let (encode_tx, encode_rx) = mpsc::channel::<std::result::Result<OwnedEncodedFrame, String>>();
     let mut encoder = H264Encoder::new(encoder_config, move |result| {
         let mapped = match result {
-            Ok(EncodeCallbackOutput::Frame { frame, value }) => Ok(OwnedEncodedFrame {
-                data: frame.data.to_vec(),
-                is_keyframe: frame.is_keyframe,
-                value,
-            }),
+            Ok(EncodeCallbackOutput::Frame { frame, value }) => match frame.data() {
+                Some(data) => Ok(OwnedEncodedFrame {
+                    data: data.to_vec(),
+                    is_keyframe: frame.is_keyframe(),
+                    value,
+                }),
+                None => Err("encoder output is DMABUF in this sample".to_string()),
+            },
             Err(err) => Err(format!("{err}")),
         };
         let _ = encode_tx.send(mapped);
@@ -460,7 +463,7 @@ fn main() -> Result<()> {
                 };
 
                 encoder.encode(
-                    InputFrame::I420(&frame_data),
+                    EncodeInput::Mmap(&frame_data),
                     timestamp_us as i64,
                     false,
                     timestamp_us,

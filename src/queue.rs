@@ -149,7 +149,7 @@ impl CaptureQueue {
     }
 
     /// 全バッファを QBUF する (初期化時に使用)。
-    pub fn enqueue_all(&mut self) -> crate::error::Result<()> {
+    pub fn enqueue_all(&self) -> crate::error::Result<()> {
         for i in 0..self.buffers.count() {
             self.enqueue(i)?;
         }
@@ -157,7 +157,7 @@ impl CaptureQueue {
     }
 
     /// 指定インデックスのバッファを QBUF する。
-    pub fn enqueue(&mut self, index: u32) -> crate::error::Result<()> {
+    pub fn enqueue(&self, index: u32) -> crate::error::Result<()> {
         let plane = self.buffers.plane(index, 0);
 
         let mut plane_info = sys::v4l2_plane {

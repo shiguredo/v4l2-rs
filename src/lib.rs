@@ -7,7 +7,6 @@ mod device;
 mod poller;
 mod queue;
 
-mod converter;
 mod decoder;
 mod encoder;
 mod error;
@@ -19,14 +18,13 @@ pub(crate) mod sys;
 /// Raspberry Pi の `/dev/video11` (エンコーダー) と `/dev/video10` (デコーダー) を
 /// 操作するための汎用的な V4L2 M2M ラッパー。WebRTC には依存しない。
 pub mod v4l2_m2m {
-    pub use crate::converter::{
-        ConvertInput, ConvertOutput, ConverterConfig, ConverterMemory, ImageConverter,
+    pub use crate::decoder::{
+        DecodeCallbackOutput, DecodeInput, DecodedFrame, DecoderConfig, H264Decoder,
     };
-    pub use crate::decoder::{DecodeCallbackOutput, DecodedFrame, DecoderConfig, H264Decoder};
     pub use crate::encoder::{
-        EncodeCallbackOutput, EncodedFrame, EncoderConfig, H264Encoder, H264Level, H264Profile,
-        InputFrame, InputMemory,
+        EncodeCallbackOutput, EncodeInput, EncodedFrame, EncoderConfig, H264Encoder, H264Level,
+        H264Profile,
     };
     pub use crate::error::{Error, Result};
-    pub use crate::format::{PixelFormat, Resolution};
+    pub use crate::format::{Memory, PixelFormat, Resolution};
 }
