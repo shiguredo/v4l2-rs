@@ -28,6 +28,7 @@ fn arb_error() -> impl Strategy<Value = Error> {
         }),
         (any::<usize>(), any::<usize>())
             .prop_map(|(size, capacity)| Error::InputTooLarge { size, capacity }),
+        any::<String>().prop_map(|_| Error::MmapInputNotProduced),
         any::<String>().prop_map(|_| Error::PollerAborted),
     ]
 }

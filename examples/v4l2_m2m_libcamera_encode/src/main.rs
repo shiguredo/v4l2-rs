@@ -463,7 +463,11 @@ fn main() -> Result<()> {
                 };
 
                 encoder.encode(
-                    EncodeInput::Mmap(&frame_data),
+                    EncodeInput::Mmap(&mut |buf| {
+                        let size = frame_data.len();
+                        buf[..size].copy_from_slice(&frame_data);
+                        Some(size)
+                    }),
                     timestamp_us as i64,
                     false,
                     timestamp_us,

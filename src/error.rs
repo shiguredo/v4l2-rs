@@ -28,6 +28,8 @@ pub enum Error {
     StreamOff { source: io::Error },
     /// 入力データがバッファ容量を超えている。
     InputTooLarge { size: usize, capacity: usize },
+    /// mmap 入力クロージャが入力データを生成しなかった。
+    MmapInputNotProduced,
     /// ポーリングスレッドが中断された。
     PollerAborted,
 }
@@ -63,6 +65,9 @@ impl std::fmt::Display for Error {
                     f,
                     "入力データがバッファ容量を超えています: サイズ {size}, 容量 {capacity}"
                 )
+            }
+            Error::MmapInputNotProduced => {
+                f.write_str("mmap 入力クロージャが入力データを生成しませんでした")
             }
             Error::PollerAborted => f.write_str("ポーリングスレッドが中断されました"),
         }

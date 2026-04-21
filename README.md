@@ -64,7 +64,16 @@ let mut encoder = H264Encoder::new(config, move |result| match result {
 let timestamp_us = 0;
 let force_keyframe = false;
 let user_value = 123_u64;
-encoder.encode(EncodeInput::Mmap(&yuv_data), timestamp_us, force_keyframe, user_value)?;
+encoder.encode(
+    EncodeInput::Mmap(&mut |buf| {
+        let size = yuv_data.len();
+        buf[..size].copy_from_slice(&yuv_data);
+        Some(size)
+    }),
+    timestamp_us,
+    force_keyframe,
+    user_value,
+)?;
 
 let (bytes, keyframe, out_ts, value) = rx.recv_timeout(Duration::from_secs(1))?;
 println!("encoded: {bytes} bytes, keyframe: {keyframe}, ts={out_ts}, value={value}");
@@ -107,7 +116,15 @@ let mut decoder = H264Decoder::new(config, move |result| match result {
 // H.264 データをデコードキューへ投入する
 let timestamp_us = 0;
 let user_value = 456_u64;
-decoder.decode(DecodeInput::Mmap(&h264_data), timestamp_us, user_value)?;
+decoder.decode(
+    DecodeInput::Mmap(&mut |buf| {
+        let size = h264_data.len();
+        buf[..size].copy_from_slice(&h264_data);
+        Some(size)
+    }),
+    timestamp_us,
+    user_value,
+)?;
 
 if let Ok(message) = rx.recv_timeout(Duration::from_secs(1)) {
     println!("{message}");

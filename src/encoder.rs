@@ -150,8 +150,10 @@ impl EncoderConfig {
 
 /// エンコーダーへの入力。
 pub enum EncodeInput<'a> {
-    /// MMAP 入力データ。
-    Mmap(&'a [u8]),
+    /// MMAP 入力バッファを直接初期化するクロージャ。
+    ///
+    /// `None` を返した場合は `Error::MmapInputNotProduced` を返す。
+    Mmap(&'a mut dyn FnMut(&mut [u8]) -> Option<usize>),
     /// DMABUF ファイルディスクリプタ。
     DmaBuf {
         fd: RawFd,
@@ -294,6 +296,7 @@ struct EncoderShared<T> {
     runtime: Mutex<EncoderRuntime<T>>,
     capture_queue: Arc<CaptureQueue>,
     resolution: Resolution,
+    input_memory: Memory,
     output_memory: u32,
     pending_async_errors: Arc<Mutex<VecDeque<crate::error::Error>>>,
 }
@@ -406,6 +409,7 @@ impl<T: Send + 'static> H264Encoder<T> {
             runtime: Mutex::new(runtime),
             capture_queue,
             resolution,
+            input_memory: config.input_memory,
             output_memory,
             pending_async_errors: Arc::new(Mutex::new(VecDeque::new())),
         });
@@ -427,6 +431,7 @@ impl<T: Send + 'static> H264Encoder<T> {
         value: T,
     ) -> crate::error::Result<()> {
         let fd = self.device.raw_fd();
+        let input_memory = self.shared.input_memory;
 
         // キーフレーム強制
         if force_keyframe {
@@ -443,22 +448,36 @@ impl<T: Send + 'static> H264Encoder<T> {
                 .ok_or(crate::error::Error::NoAvailableBuffer)?;
 
             let enqueue_result = match frame {
-                EncodeInput::Mmap(data) => {
-                    runtime
-                        .output_queue
-                        .enqueue(output_index, data, timestamp_us)
+                EncodeInput::Mmap(fill) => {
+                    if !matches!(input_memory, Memory::Mmap) {
+                        Err(crate::error::Error::InvalidFormat {
+                            reason: "encoder is configured for DMABUF input".to_string(),
+                        })
+                    } else {
+                        runtime
+                            .output_queue
+                            .enqueue(output_index, fill, timestamp_us)
+                    }
                 }
                 EncodeInput::DmaBuf {
                     fd: dmabuf_fd,
                     bytesused,
                     length,
-                } => runtime.output_queue.enqueue_dmabuf(
-                    output_index,
-                    dmabuf_fd,
-                    bytesused,
-                    length,
-                    timestamp_us,
-                ),
+                } => {
+                    if !matches!(input_memory, Memory::DmaBuf) {
+                        Err(crate::error::Error::InvalidFormat {
+                            reason: "encoder is configured for MMAP input".to_string(),
+                        })
+                    } else {
+                        runtime.output_queue.enqueue_dmabuf(
+                            output_index,
+                            dmabuf_fd,
+                            bytesused,
+                            length,
+                            timestamp_us,
+                        )
+                    }
+                }
             };
 
             if let Err(err) = enqueue_result {

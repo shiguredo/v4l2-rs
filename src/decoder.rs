@@ -49,8 +49,10 @@ impl Default for DecoderConfig {
 
 /// デコーダー入力。
 pub enum DecodeInput<'a> {
-    /// mmap 入力。
-    Mmap(&'a [u8]),
+    /// mmap 入力バッファを直接初期化するクロージャ。
+    ///
+    /// `None` を返した場合は `Error::MmapInputNotProduced` を返す。
+    Mmap(&'a mut dyn FnMut(&mut [u8]) -> Option<usize>),
     /// DMABUF 入力。
     DmaBuf {
         fd: RawFd,
@@ -301,7 +303,7 @@ impl<T: Send + 'static> H264Decoder<T> {
             .ok_or(crate::error::Error::NoAvailableBuffer)?;
 
         let enqueue_result = match input {
-            DecodeInput::Mmap(data) => {
+            DecodeInput::Mmap(fill) => {
                 if !matches!(input_memory, Memory::Mmap) {
                     Err(crate::error::Error::InvalidFormat {
                         reason: "decoder is configured for DMABUF input".to_string(),
@@ -309,7 +311,7 @@ impl<T: Send + 'static> H264Decoder<T> {
                 } else {
                     runtime
                         .output_queue
-                        .enqueue(output_index, data, timestamp_us)
+                        .enqueue(output_index, fill, timestamp_us)
                 }
             }
             DecodeInput::DmaBuf {
