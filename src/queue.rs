@@ -42,50 +42,67 @@ impl OutputQueue {
         self.available.push_back(index);
     }
 
-    /// データをバッファにコピーして QBUF する。
+    /// mmap バッファを直接初期化して QBUF する。
     pub fn enqueue(
         &mut self,
         index: u32,
-        data: &[u8],
+        fill: &mut dyn FnMut(&mut [u8]) -> Option<usize>,
         timestamp_us: i64,
     ) -> crate::error::Result<()> {
-        // 先にバッファ情報を取得してボローを解放
         let plane_length = self.buffers.plane(index, 0).length;
-        let is_dmabuf = matches!(
-            &self.buffers.plane(index, 0).mapping,
-            PlaneMapping::DmaBuf(_)
-        );
-        let dmabuf_fd = self.buffers.dmabuf_fd(index, 0);
+        let bytesused = {
+            let buf = self.buffers.mmap_slice_mut(index, 0).ok_or(
+                crate::error::Error::InvalidFormat {
+                    reason: "output queue does not provide MMAP buffer".to_string(),
+                },
+            )?;
+            fill(buf).ok_or(crate::error::Error::MmapInputNotProduced)?
+        };
 
-        if data.len() > plane_length as usize {
+        if bytesused > plane_length as usize {
             return Err(crate::error::Error::InputTooLarge {
-                size: data.len(),
+                size: bytesused,
                 capacity: plane_length as usize,
             });
         }
 
-        // mmap バッファにデータをコピー
-        if let Some(buf) = self.buffers.mmap_slice_mut(index, 0) {
-            buf[..data.len()].copy_from_slice(data);
+        self.enqueue_with_plane(
+            index,
+            bytesused as u32,
+            plane_length,
+            sys::v4l2_plane_m { mem_offset: 0 },
+            self.memory,
+            timestamp_us,
+        )
+    }
+
+    fn enqueue_with_plane(
+        &mut self,
+        index: u32,
+        bytesused: u32,
+        length: u32,
+        plane_m: sys::v4l2_plane_m,
+        memory: u32,
+        timestamp_us: i64,
+    ) -> crate::error::Result<()> {
+        if bytesused > length {
+            return Err(crate::error::Error::InputTooLarge {
+                size: bytesused as usize,
+                capacity: length as usize,
+            });
         }
 
         let timestamp = sys::timestamp_us_to_timeval(timestamp_us);
 
         let mut plane_info = sys::v4l2_plane {
-            bytesused: data.len() as u32,
-            length: plane_length,
-            m: if is_dmabuf {
-                sys::v4l2_plane_m {
-                    fd: dmabuf_fd.unwrap_or(-1),
-                }
-            } else {
-                sys::v4l2_plane_m { mem_offset: 0 }
-            },
+            bytesused,
+            length,
+            m: plane_m,
             data_offset: 0,
             reserved: [0; 11],
         };
 
-        let mut buf = sys::zeroed_buffer(self.buf_type, self.memory);
+        let mut buf = sys::zeroed_buffer(self.buf_type, memory);
         buf.index = index;
         buf.length = 1;
         buf.flags = sys::V4L2_BUF_FLAG_TIMESTAMP_COPY;
@@ -106,26 +123,14 @@ impl OutputQueue {
         length: u32,
         timestamp_us: i64,
     ) -> crate::error::Result<()> {
-        let timestamp = sys::timestamp_us_to_timeval(timestamp_us);
-
-        let mut plane_info = sys::v4l2_plane {
+        self.enqueue_with_plane(
+            index,
             bytesused,
             length,
-            m: sys::v4l2_plane_m { fd: dmabuf_fd },
-            data_offset: 0,
-            reserved: [0; 11],
-        };
-
-        let mut buf = sys::zeroed_buffer(self.buf_type, sys::V4L2_MEMORY_DMABUF);
-        buf.index = index;
-        buf.length = 1;
-        buf.flags = sys::V4L2_BUF_FLAG_TIMESTAMP_COPY;
-        buf.timestamp = timestamp;
-        buf.m = sys::v4l2_buffer_m {
-            planes: &mut plane_info as *mut _,
-        };
-
-        sys::ioctl_qbuf(self.fd, &mut buf)
+            sys::v4l2_plane_m { fd: dmabuf_fd },
+            sys::V4L2_MEMORY_DMABUF,
+            timestamp_us,
+        )
     }
 }
 
@@ -149,7 +154,7 @@ impl CaptureQueue {
     }
 
     /// 全バッファを QBUF する (初期化時に使用)。
-    pub fn enqueue_all(&mut self) -> crate::error::Result<()> {
+    pub fn enqueue_all(&self) -> crate::error::Result<()> {
         for i in 0..self.buffers.count() {
             self.enqueue(i)?;
         }
@@ -157,7 +162,7 @@ impl CaptureQueue {
     }
 
     /// 指定インデックスのバッファを QBUF する。
-    pub fn enqueue(&mut self, index: u32) -> crate::error::Result<()> {
+    pub fn enqueue(&self, index: u32) -> crate::error::Result<()> {
         let plane = self.buffers.plane(index, 0);
 
         let mut plane_info = sys::v4l2_plane {

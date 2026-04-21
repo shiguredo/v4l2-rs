@@ -128,7 +128,7 @@ fn main() -> Result<()> {
                 device_path: args.encoder_device.clone(),
                 ..config
             };
-            match H264Encoder::new(config) {
+            match H264Encoder::<()>::new(config, |_| {}) {
                 Ok(_) => println!("OK"),
                 Err(e) => {
                     println!("NG ({e})");
@@ -150,7 +150,7 @@ fn main() -> Result<()> {
                 device_path: args.decoder_device.clone(),
                 ..DecoderConfig::new()
             };
-            match H264Decoder::new(config) {
+            match H264Decoder::<()>::new(config, |_| {}) {
                 Ok(_) => println!("OK"),
                 Err(e) => {
                     println!("NG ({e})");

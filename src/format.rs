@@ -2,6 +2,24 @@
 
 use crate::sys;
 
+/// V4L2 バッファのメモリ方式。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Memory {
+    /// mmap によるコピー入出力。
+    Mmap,
+    /// DMABUF によるゼロコピー入出力。
+    DmaBuf,
+}
+
+impl Memory {
+    pub(crate) fn to_v4l2(self) -> u32 {
+        match self {
+            Memory::Mmap => sys::V4L2_MEMORY_MMAP,
+            Memory::DmaBuf => sys::V4L2_MEMORY_DMABUF,
+        }
+    }
+}
+
 /// ピクセルフォーマット。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PixelFormat {

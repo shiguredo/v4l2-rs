@@ -18,6 +18,8 @@ pub(crate) struct MmapRegion {
 // SAFETY: MmapRegion の ptr はプロセス全体から見える共有メモリだが、
 // 排他アクセスはキュー管理によって保証する。
 unsafe impl Send for MmapRegion {}
+// SAFETY: 共有参照では読み取りのみを許可し、可変アクセスは &mut が必要なため競合しない。
+unsafe impl Sync for MmapRegion {}
 
 impl MmapRegion {
     /// 新しい mmap 領域を作成する。
