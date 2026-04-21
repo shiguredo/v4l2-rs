@@ -3,14 +3,13 @@
 //! Raspberry Pi 向け V4L2 M2M (Memory-to-Memory) デバイスへのバインディング。
 
 mod buffer;
-mod device;
-mod poller;
-mod queue;
-
 mod decoder;
+mod device;
 mod encoder;
 mod error;
 mod format;
+mod poller;
+mod queue;
 pub(crate) mod sys;
 
 /// V4L2 M2M (Memory-to-Memory) を使った H.264 エンコード/デコード。

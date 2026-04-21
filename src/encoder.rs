@@ -286,38 +286,25 @@ struct ConfiguredOutputFormat {
 
 struct EncoderRuntime<T> {
     output_queue: OutputQueue,
-    capture_queue: Arc<CaptureQueue>,
-    resolution: Resolution,
-    output_memory: u32,
     started: bool,
     pending_values: VecDeque<T>,
 }
 
 struct EncoderShared<T> {
     runtime: Mutex<EncoderRuntime<T>>,
-    callback: Mutex<Box<EncoderCallback<T>>>,
+    capture_queue: Arc<CaptureQueue>,
+    resolution: Resolution,
+    output_memory: u32,
     pending_async_errors: Arc<Mutex<VecDeque<crate::error::Error>>>,
 }
 
 impl<T> EncoderShared<T> {
-    fn emit_callback(&self, output: crate::error::Result<EncodeCallbackOutput<T>>) {
-        if let Ok(mut callback) = self.callback.lock() {
-            (callback)(output);
-        }
-    }
-
-    fn emit_error(&self, err: crate::error::Error) {
-        self.emit_callback(Err(err));
-    }
-
-    fn emit_pending_async_errors(&self) {
+    fn drain_pending_async_errors(&self) -> Vec<crate::error::Error> {
         let mut errors = Vec::new();
         if let Ok(mut pending) = self.pending_async_errors.lock() {
             errors.extend(pending.drain(..));
         }
-        for err in errors {
-            self.emit_error(err);
-        }
+        errors
     }
 }
 
@@ -328,6 +315,7 @@ impl<T> EncoderShared<T> {
 pub struct H264Encoder<T> {
     poller: Option<Poller>,
     shared: Arc<EncoderShared<T>>,
+    callback: Option<Box<EncoderCallback<T>>>,
     device: Device,
 }
 
@@ -410,22 +398,22 @@ impl<T: Send + 'static> H264Encoder<T> {
 
         let runtime = EncoderRuntime {
             output_queue,
-            capture_queue,
-            resolution,
-            output_memory,
             started: false,
             pending_values: VecDeque::new(),
         };
 
         let shared = Arc::new(EncoderShared {
             runtime: Mutex::new(runtime),
-            callback: Mutex::new(Box::new(callback)),
+            capture_queue,
+            resolution,
+            output_memory,
             pending_async_errors: Arc::new(Mutex::new(VecDeque::new())),
         });
 
         Ok(H264Encoder {
             poller: None,
             shared,
+            callback: Some(Box::new(callback)),
             device,
         })
     }
@@ -519,14 +507,7 @@ impl<T: Send + 'static> H264Encoder<T> {
 
     /// 現在の解像度を取得する。
     pub fn resolution(&self) -> Resolution {
-        match self.shared.runtime.lock() {
-            Ok(runtime) => runtime.resolution,
-            Err(_) => Resolution {
-                width: 0,
-                height: 0,
-                stride: 0,
-            },
-        }
+        self.shared.resolution
     }
 
     fn lock_runtime(&self) -> crate::error::Result<MutexGuard<'_, EncoderRuntime<T>>> {
@@ -541,13 +522,15 @@ impl<T: Send + 'static> H264Encoder<T> {
             return;
         }
 
-        let fd = self.device.raw_fd();
-        let output_memory = match self.shared.runtime.lock() {
-            Ok(runtime) => runtime.output_memory,
-            Err(_) => return,
+        let Some(mut callback) = self.callback.take() else {
+            return;
         };
 
+        let fd = self.device.raw_fd();
+        let output_memory = self.shared.output_memory;
+
         let shared = self.shared.clone();
+        // callback は poller スレッドのクロージャーが単独所有する。
         self.poller = Some(Poller::start(
             PollerConfig {
                 fd,
@@ -557,19 +540,36 @@ impl<T: Send + 'static> H264Encoder<T> {
                 capture_memory: sys::V4L2_MEMORY_MMAP,
                 subscribe_events: false,
             },
-            move |event| Self::handle_event(&shared, event),
+            move |event| Self::handle_event(&shared, callback.as_mut(), event),
         ));
     }
 
-    fn handle_event(shared: &Arc<EncoderShared<T>>, event: PollEvent) {
-        shared.emit_pending_async_errors();
+    fn emit_callback(
+        callback: &mut EncoderCallback<T>,
+        output: crate::error::Result<EncodeCallbackOutput<T>>,
+    ) {
+        callback(output);
+    }
+
+    fn emit_error(callback: &mut EncoderCallback<T>, err: crate::error::Error) {
+        Self::emit_callback(callback, Err(err));
+    }
+
+    fn handle_event(
+        shared: &Arc<EncoderShared<T>>,
+        callback: &mut EncoderCallback<T>,
+        event: PollEvent,
+    ) {
+        for err in shared.drain_pending_async_errors() {
+            Self::emit_error(callback, err);
+        }
 
         match event {
             PollEvent::OutputDequeued { index } => {
                 if let Ok(mut runtime) = shared.runtime.lock() {
                     runtime.output_queue.return_buffer(index);
                 } else {
-                    shared.emit_error(crate::error::Error::PollerAborted);
+                    Self::emit_error(callback, crate::error::Error::PollerAborted);
                 }
             }
             PollEvent::CaptureDequeued {
@@ -577,8 +577,8 @@ impl<T: Send + 'static> H264Encoder<T> {
                 bytesused,
                 flags,
                 timestamp,
-            } => Self::handle_capture(shared, index, bytesused, flags, timestamp),
-            PollEvent::Error(err) => shared.emit_error(err),
+            } => Self::handle_capture(shared, callback, index, bytesused, flags, timestamp),
+            PollEvent::Error(err) => Self::emit_error(callback, err),
             PollEvent::SourceChanged => {
                 // エンコーダーでは発生しない。
             }
@@ -587,29 +587,30 @@ impl<T: Send + 'static> H264Encoder<T> {
 
     fn handle_capture(
         shared: &Arc<EncoderShared<T>>,
+        callback: &mut EncoderCallback<T>,
         index: u32,
         bytesused: u32,
         flags: u32,
         timestamp: Timestamp,
     ) {
-        let (capture_queue, pending_value) = match shared.runtime.lock() {
+        let pending_value = match shared.runtime.lock() {
             Ok(mut runtime) => {
                 let Some(value) = runtime.pending_values.pop_front() else {
-                    let capture_queue = runtime.capture_queue.clone();
                     drop(runtime);
-                    shared.emit_error(crate::error::Error::NoAvailableBuffer);
-                    if let Err(err) = capture_queue.enqueue(index) {
-                        shared.emit_error(err);
+                    Self::emit_error(callback, crate::error::Error::NoAvailableBuffer);
+                    if let Err(err) = shared.capture_queue.enqueue(index) {
+                        Self::emit_error(callback, err);
                     }
                     return;
                 };
-                (runtime.capture_queue.clone(), value)
+                value
             }
             Err(_) => {
-                shared.emit_error(crate::error::Error::PollerAborted);
+                Self::emit_error(callback, crate::error::Error::PollerAborted);
                 return;
             }
         };
+        let capture_queue = shared.capture_queue.clone();
 
         let frame = match EncodedFrame::new(
             capture_queue.clone(),
@@ -621,18 +622,21 @@ impl<T: Send + 'static> H264Encoder<T> {
         ) {
             Ok(frame) => frame,
             Err(err) => {
-                shared.emit_error(err);
+                Self::emit_error(callback, err);
                 if let Err(requeue_err) = capture_queue.enqueue(index) {
-                    shared.emit_error(requeue_err);
+                    Self::emit_error(callback, requeue_err);
                 }
                 return;
             }
         };
 
-        shared.emit_callback(Ok(EncodeCallbackOutput::Frame {
-            frame,
-            value: pending_value,
-        }));
+        Self::emit_callback(
+            callback,
+            Ok(EncodeCallbackOutput::Frame {
+                frame,
+                value: pending_value,
+            }),
+        );
     }
 
     fn set_controls(fd: RawFd, config: &EncoderConfig) -> crate::error::Result<()> {

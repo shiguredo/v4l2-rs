@@ -171,42 +171,29 @@ pub enum DecodeCallbackOutput<T> {
 type DecoderCallback<T> = dyn FnMut(crate::error::Result<DecodeCallbackOutput<T>>) + Send;
 
 struct DecoderRuntime<T> {
-    fd: RawFd,
     output_queue: OutputQueue,
     capture_queue: Option<Arc<CaptureQueue>>,
     resolution: Option<Resolution>,
-    input_memory: Memory,
-    output_memory: Memory,
-    capture_buffer_count: u32,
     capture_started: bool,
     pending_values: VecDeque<T>,
 }
 
 struct DecoderShared<T> {
     runtime: Mutex<DecoderRuntime<T>>,
-    callback: Mutex<Box<DecoderCallback<T>>>,
+    fd: RawFd,
+    input_memory: Memory,
+    output_memory: Memory,
+    capture_buffer_count: u32,
     pending_async_errors: Arc<Mutex<VecDeque<crate::error::Error>>>,
 }
 
 impl<T> DecoderShared<T> {
-    fn emit_callback(&self, output: crate::error::Result<DecodeCallbackOutput<T>>) {
-        if let Ok(mut callback) = self.callback.lock() {
-            (callback)(output);
-        }
-    }
-
-    fn emit_error(&self, err: crate::error::Error) {
-        self.emit_callback(Err(err));
-    }
-
-    fn emit_pending_async_errors(&self) {
+    fn drain_pending_async_errors(&self) -> Vec<crate::error::Error> {
         let mut errors = Vec::new();
         if let Ok(mut pending) = self.pending_async_errors.lock() {
             errors.extend(pending.drain(..));
         }
-        for err in errors {
-            self.emit_error(err);
-        }
+        errors
     }
 }
 
@@ -263,20 +250,21 @@ impl<T: Send + 'static> H264Decoder<T> {
 
         let shared = Arc::new(DecoderShared {
             runtime: Mutex::new(DecoderRuntime {
-                fd,
                 output_queue,
                 capture_queue: None,
                 resolution: None,
-                input_memory: config.input_memory,
-                output_memory: config.output_memory,
-                capture_buffer_count: config.capture_buffer_count,
                 capture_started: false,
                 pending_values: VecDeque::new(),
             }),
-            callback: Mutex::new(Box::new(callback)),
+            fd,
+            input_memory: config.input_memory,
+            output_memory: config.output_memory,
+            capture_buffer_count: config.capture_buffer_count,
             pending_async_errors: Arc::new(Mutex::new(VecDeque::new())),
         });
 
+        // callback は poller スレッドのクロージャーが単独所有する。
+        let mut callback = Box::new(callback) as Box<DecoderCallback<T>>;
         let poller_shared = shared.clone();
         let poller = Poller::start(
             PollerConfig {
@@ -287,7 +275,7 @@ impl<T: Send + 'static> H264Decoder<T> {
                 capture_memory: sys::V4L2_MEMORY_MMAP,
                 subscribe_events,
             },
-            move |event| Self::handle_event(&poller_shared, event),
+            move |event| Self::handle_event(&poller_shared, callback.as_mut(), event),
         );
 
         Ok(H264Decoder {
@@ -304,6 +292,7 @@ impl<T: Send + 'static> H264Decoder<T> {
         timestamp_us: i64,
         value: T,
     ) -> crate::error::Result<()> {
+        let input_memory = self.shared.input_memory;
         let mut runtime = self.lock_runtime()?;
 
         let output_index = runtime
@@ -313,7 +302,7 @@ impl<T: Send + 'static> H264Decoder<T> {
 
         let enqueue_result = match input {
             DecodeInput::Mmap(data) => {
-                if !matches!(runtime.input_memory, Memory::Mmap) {
+                if !matches!(input_memory, Memory::Mmap) {
                     Err(crate::error::Error::InvalidFormat {
                         reason: "decoder is configured for DMABUF input".to_string(),
                     })
@@ -328,7 +317,7 @@ impl<T: Send + 'static> H264Decoder<T> {
                 bytesused,
                 length,
             } => {
-                if !matches!(runtime.input_memory, Memory::DmaBuf) {
+                if !matches!(input_memory, Memory::DmaBuf) {
                     Err(crate::error::Error::InvalidFormat {
                         reason: "decoder is configured for MMAP input".to_string(),
                     })
@@ -368,30 +357,48 @@ impl<T: Send + 'static> H264Decoder<T> {
             .map_err(|_| crate::error::Error::PollerAborted)
     }
 
-    fn handle_event(shared: &Arc<DecoderShared<T>>, event: PollEvent) {
-        shared.emit_pending_async_errors();
+    fn emit_callback(
+        callback: &mut DecoderCallback<T>,
+        output: crate::error::Result<DecodeCallbackOutput<T>>,
+    ) {
+        callback(output);
+    }
+
+    fn emit_error(callback: &mut DecoderCallback<T>, err: crate::error::Error) {
+        Self::emit_callback(callback, Err(err));
+    }
+
+    fn handle_event(
+        shared: &Arc<DecoderShared<T>>,
+        callback: &mut DecoderCallback<T>,
+        event: PollEvent,
+    ) {
+        for err in shared.drain_pending_async_errors() {
+            Self::emit_error(callback, err);
+        }
 
         match event {
             PollEvent::OutputDequeued { index } => {
                 if let Ok(mut runtime) = shared.runtime.lock() {
                     runtime.output_queue.return_buffer(index);
                 } else {
-                    shared.emit_error(crate::error::Error::PollerAborted);
+                    Self::emit_error(callback, crate::error::Error::PollerAborted);
                 }
             }
-            PollEvent::SourceChanged => Self::handle_source_change(shared),
+            PollEvent::SourceChanged => Self::handle_source_change(shared, callback),
             PollEvent::CaptureDequeued {
                 index,
                 bytesused,
                 flags: _,
                 timestamp,
-            } => Self::handle_capture(shared, index, bytesused, timestamp),
-            PollEvent::Error(err) => shared.emit_error(err),
+            } => Self::handle_capture(shared, callback, index, bytesused, timestamp),
+            PollEvent::Error(err) => Self::emit_error(callback, err),
         }
     }
 
-    fn handle_source_change(shared: &Arc<DecoderShared<T>>) {
+    fn handle_source_change(shared: &Arc<DecoderShared<T>>, callback: &mut DecoderCallback<T>) {
         let resolution_result = (|| -> crate::error::Result<Resolution> {
+            let fd = shared.fd;
             let mut runtime = shared
                 .runtime
                 .lock()
@@ -399,7 +406,7 @@ impl<T: Send + 'static> H264Decoder<T> {
 
             // CAPTURE ストリームを停止 (開始済みの場合)
             if runtime.capture_started {
-                let _ = sys::ioctl_streamoff(runtime.fd, sys::V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE);
+                let _ = sys::ioctl_streamoff(fd, sys::V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE);
                 runtime.capture_started = false;
             }
 
@@ -408,7 +415,7 @@ impl<T: Send + 'static> H264Decoder<T> {
 
             // G_FMT で新しい解像度を取得
             let mut fmt = sys::zeroed_format(sys::V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE);
-            sys::ioctl_g_fmt(runtime.fd, &mut fmt)?;
+            sys::ioctl_g_fmt(fd, &mut fmt)?;
 
             let (width, height, stride) = unsafe {
                 (
@@ -425,18 +432,18 @@ impl<T: Send + 'static> H264Decoder<T> {
             };
             runtime.resolution = Some(resolution);
 
-            let export_dmabuf = matches!(runtime.output_memory, Memory::DmaBuf);
+            let export_dmabuf = matches!(shared.output_memory, Memory::DmaBuf);
 
             // 新しい CAPTURE バッファを確保
             let capture_buffers = BufferSet::allocate(
-                runtime.fd,
+                fd,
                 sys::V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE,
                 sys::V4L2_MEMORY_MMAP,
-                runtime.capture_buffer_count,
+                shared.capture_buffer_count,
                 export_dmabuf,
             )?;
             let capture_queue = Arc::new(CaptureQueue::new(
-                runtime.fd,
+                fd,
                 sys::V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE,
                 sys::V4L2_MEMORY_MMAP,
                 capture_buffers,
@@ -447,22 +454,24 @@ impl<T: Send + 'static> H264Decoder<T> {
             runtime.capture_queue = Some(capture_queue);
 
             // CAPTURE STREAMON
-            sys::ioctl_streamon(runtime.fd, sys::V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE)?;
+            sys::ioctl_streamon(fd, sys::V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE)?;
             runtime.capture_started = true;
 
             Ok(resolution)
         })();
 
         match resolution_result {
-            Ok(resolution) => {
-                shared.emit_callback(Ok(DecodeCallbackOutput::ResolutionChanged { resolution }));
-            }
-            Err(err) => shared.emit_error(err),
+            Ok(resolution) => Self::emit_callback(
+                callback,
+                Ok(DecodeCallbackOutput::ResolutionChanged { resolution }),
+            ),
+            Err(err) => Self::emit_error(callback, err),
         }
     }
 
     fn handle_capture(
         shared: &Arc<DecoderShared<T>>,
+        callback: &mut DecoderCallback<T>,
         index: u32,
         bytesused: u32,
         timestamp: Timestamp,
@@ -512,14 +521,14 @@ impl<T: Send + 'static> H264Decoder<T> {
 
         match dispatch {
             CaptureDispatch::Frame { frame, value } => {
-                shared.emit_callback(Ok(DecodeCallbackOutput::Frame { frame, value }));
+                Self::emit_callback(callback, Ok(DecodeCallbackOutput::Frame { frame, value }))
             }
             CaptureDispatch::Error { err, capture_queue } => {
-                shared.emit_error(err);
+                Self::emit_error(callback, err);
                 if let Some(capture_queue) = capture_queue
                     && let Err(requeue_err) = capture_queue.enqueue(index)
                 {
-                    shared.emit_error(requeue_err);
+                    Self::emit_error(callback, requeue_err);
                 }
             }
         }
