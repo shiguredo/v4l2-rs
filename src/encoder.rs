@@ -148,12 +148,14 @@ impl EncoderConfig {
     }
 }
 
+type EncodeMmapFill<'a, T> = dyn FnMut(&mut [u8], &Resolution, &T) -> Option<usize> + 'a;
+
 /// エンコーダーへの入力。
-pub enum EncodeInput<'a> {
+pub enum EncodeInput<'a, T> {
     /// MMAP 入力バッファを直接初期化するクロージャ。
     ///
     /// `None` を返した場合は `Error::MmapInputNotProduced` を返す。
-    Mmap(&'a mut dyn FnMut(&mut [u8], &Resolution) -> Option<usize>),
+    Mmap(&'a mut EncodeMmapFill<'a, T>),
     /// DMABUF ファイルディスクリプタ。
     DmaBuf {
         fd: RawFd,
@@ -425,7 +427,7 @@ impl<T: Send + 'static> H264Encoder<T> {
     /// フレームをエンキューする。
     pub fn encode(
         &mut self,
-        frame: EncodeInput<'_>,
+        frame: EncodeInput<'_, T>,
         timestamp_us: i64,
         force_keyframe: bool,
         value: T,
@@ -456,7 +458,7 @@ impl<T: Send + 'static> H264Encoder<T> {
                         })
                     } else {
                         let mut fill_with_resolution =
-                            |buf: &mut [u8]| -> Option<usize> { fill(buf, &resolution) };
+                            |buf: &mut [u8]| -> Option<usize> { fill(buf, &resolution, &value) };
                         runtime.output_queue.enqueue(
                             output_index,
                             &mut fill_with_resolution,

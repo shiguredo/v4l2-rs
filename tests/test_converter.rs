@@ -73,19 +73,19 @@ struct Pipeline {
 // encoder callback まで ConvertedFrame の寿命を保持する。
 struct EncoderValue {
     value: i64,
-    _converted: ConvertedFrame,
+    converted: ConvertedFrame,
 }
 
 // decoder callback まで EncodedFrame の寿命を保持する。
 struct DecoderValue {
     value: i64,
-    _encoded: EncodedFrame,
+    encoded: EncodedFrame,
 }
 
 // converter_out callback まで DecodedFrame の寿命を保持する。
 struct ConverterOutValue {
     value: i64,
-    _decoded: DecodedFrame,
+    decoded: DecodedFrame,
 }
 
 // 全て MMAP を利用してパイプラインを構築するケース
@@ -126,7 +126,7 @@ fn run_pipeline_test(case: TestCase) {
         pipeline
             .converter_in
             .convert(
-                ConvertInput::Mmap(&mut |buf, _resolution| {
+                ConvertInput::Mmap(&mut |buf, _resolution, _value| {
                     let size = source.len();
                     buf[..size].copy_from_slice(&source);
                     Some(size)
@@ -358,24 +358,18 @@ fn forward_converted_to_encoder(
     match encoder_input {
         Memory::Mmap => {
             // MMAP 入力では callback で得たデータを encoder の入力バッファへコピーする。
-            let (src_ptr, src_len) = {
-                let data = frame.data().ok_or_else(|| {
-                    "encoder が MMAP 入力のとき converter_in は MMAP で受け取る必要があります"
-                        .to_string()
-                })?;
-                (data.as_ptr(), data.len())
-            };
             let next_value = EncoderValue {
                 value,
-                _converted: frame,
+                converted: frame,
             };
             encoder
                 .encode(
-                    EncodeInput::Mmap(&mut |buf, _resolution| {
-                        // SAFETY:
-                        // src_ptr/src_len は next_value が保持する ConvertedFrame の領域を指す。
-                        // next_value はこの encode 呼び出しで保持されるため、このコピー中に解放されることは無い。
-                        let src = unsafe { std::slice::from_raw_parts(src_ptr, src_len) };
+                    EncodeInput::Mmap(&mut |buf, _resolution, value| {
+                        let src = value
+                            .converted
+                            .data()
+                            .expect("converter_in が MMAP でないデータを返しました");
+                        let src_len = src.len();
                         buf[..src_len].copy_from_slice(src);
                         Some(src_len)
                     }),
@@ -395,7 +389,7 @@ fn forward_converted_to_encoder(
             let length = frame.length();
             let next_value = EncoderValue {
                 value,
-                _converted: frame,
+                converted: frame,
             };
             encoder
                 .encode(
@@ -428,23 +422,18 @@ fn forward_encoded_to_decoder(
     match decoder_input {
         Memory::Mmap => {
             // MMAP 経路はコピー転送。
-            let (src_ptr, src_len) = {
-                let data = frame.data().ok_or_else(|| {
-                    "decoder が MMAP 入力のとき encoder は MMAP を返す必要があります".to_string()
-                })?;
-                (data.as_ptr(), data.len())
-            };
             let next_value = DecoderValue {
                 value: frame_no,
-                _encoded: frame,
+                encoded: frame,
             };
             decoder
                 .decode(
-                    DecodeInput::Mmap(&mut |buf| {
-                        // SAFETY:
-                        // src_ptr/src_len は next_value が保持する EncodedFrame の領域を指す。
-                        // next_value はこの decode 呼び出しで保持されるため、このコピー中に解放されることは無い。
-                        let src = unsafe { std::slice::from_raw_parts(src_ptr, src_len) };
+                    DecodeInput::Mmap(&mut |buf, value| {
+                        let src = value
+                            .encoded
+                            .data()
+                            .expect("encoder が MMAP でないデータを返しました");
+                        let src_len = src.len();
                         buf[..src_len].copy_from_slice(src);
                         Some(src_len)
                     }),
@@ -462,7 +451,7 @@ fn forward_encoded_to_decoder(
             let length = frame.length();
             let next_value = DecoderValue {
                 value: frame_no,
-                _encoded: frame,
+                encoded: frame,
             };
             decoder
                 .decode(
@@ -494,24 +483,18 @@ fn forward_decoded_to_converter_out(
     match converter_out_input {
         Memory::Mmap => {
             // MMAP 経路はコピー転送。
-            let (src_ptr, src_len) = {
-                let data = frame.data().ok_or_else(|| {
-                    "converter_out が MMAP 入力のとき decoder は MMAP を返す必要があります"
-                        .to_string()
-                })?;
-                (data.as_ptr(), data.len())
-            };
             let next_value = ConverterOutValue {
                 value: frame_no,
-                _decoded: frame,
+                decoded: frame,
             };
             converter_out
                 .convert(
-                    ConvertInput::Mmap(&mut |buf, _resolution| {
-                        // SAFETY:
-                        // src_ptr/src_len は next_value が保持する DecodedFrame の領域を指す。
-                        // next_value はこの convert 呼び出しで保持されるため、このコピー中に解放されることは無い。
-                        let src = unsafe { std::slice::from_raw_parts(src_ptr, src_len) };
+                    ConvertInput::Mmap(&mut |buf, _resolution, value| {
+                        let src = value
+                            .decoded
+                            .data()
+                            .expect("decoder が MMAP でないデータを返しました");
+                        let src_len = src.len();
                         buf[..src_len].copy_from_slice(src);
                         Some(src_len)
                     }),
@@ -530,7 +513,7 @@ fn forward_decoded_to_converter_out(
             let length = frame.length();
             let next_value = ConverterOutValue {
                 value: frame_no,
-                _decoded: frame,
+                decoded: frame,
             };
             converter_out
                 .convert(

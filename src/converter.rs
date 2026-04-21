@@ -56,12 +56,14 @@ impl ConverterConfig {
     }
 }
 
+type ConvertMmapFill<'a, T> = dyn FnMut(&mut [u8], &Resolution, &T) -> Option<usize> + 'a;
+
 /// 変換入力。
-pub enum ConvertInput<'a> {
+pub enum ConvertInput<'a, T> {
     /// mmap 入力バッファを直接初期化するクロージャ。
     ///
     /// `None` を返した場合は `Error::MmapInputNotProduced` を返す。
-    Mmap(&'a mut dyn FnMut(&mut [u8], &Resolution) -> Option<usize>),
+    Mmap(&'a mut ConvertMmapFill<'a, T>),
     /// DMABUF 入力バッファ。
     DmaBuf {
         fd: RawFd,
@@ -303,7 +305,7 @@ impl<T: Send + 'static> ImageConverter<T> {
     /// 1 フレームを変換キューに投入する。
     pub fn convert(
         &mut self,
-        input: ConvertInput<'_>,
+        input: ConvertInput<'_, T>,
         timestamp_us: i64,
         value: T,
     ) -> crate::error::Result<()> {
@@ -327,8 +329,9 @@ impl<T: Send + 'static> ImageConverter<T> {
                             reason: "converter is configured for DMABUF input".to_string(),
                         })
                     } else {
-                        let mut fill_with_resolution =
-                            |buf: &mut [u8]| -> Option<usize> { fill(buf, &input_resolution) };
+                        let mut fill_with_resolution = |buf: &mut [u8]| -> Option<usize> {
+                            fill(buf, &input_resolution, &value)
+                        };
                         runtime.output_queue.enqueue(
                             output_index,
                             &mut fill_with_resolution,
