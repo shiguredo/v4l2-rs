@@ -463,7 +463,7 @@ fn main() -> Result<()> {
                 };
 
                 encoder.encode(
-                    EncodeInput::Mmap(&mut |buf| {
+                    EncodeInput::Mmap(&mut |buf, _resolution| {
                         let size = frame_data.len();
                         buf[..size].copy_from_slice(&frame_data);
                         Some(size)

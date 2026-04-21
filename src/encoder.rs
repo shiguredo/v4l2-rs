@@ -153,7 +153,7 @@ pub enum EncodeInput<'a> {
     /// MMAP 入力バッファを直接初期化するクロージャ。
     ///
     /// `None` を返した場合は `Error::MmapInputNotProduced` を返す。
-    Mmap(&'a mut dyn FnMut(&mut [u8]) -> Option<usize>),
+    Mmap(&'a mut dyn FnMut(&mut [u8], &Resolution) -> Option<usize>),
     /// DMABUF ファイルディスクリプタ。
     DmaBuf {
         fd: RawFd,
@@ -432,6 +432,7 @@ impl<T: Send + 'static> H264Encoder<T> {
     ) -> crate::error::Result<()> {
         let fd = self.device.raw_fd();
         let input_memory = self.shared.input_memory;
+        let resolution = self.shared.resolution;
 
         // キーフレーム強制
         if force_keyframe {
@@ -454,9 +455,13 @@ impl<T: Send + 'static> H264Encoder<T> {
                             reason: "encoder is configured for DMABUF input".to_string(),
                         })
                     } else {
-                        runtime
-                            .output_queue
-                            .enqueue(output_index, fill, timestamp_us)
+                        let mut fill_with_resolution =
+                            |buf: &mut [u8]| -> Option<usize> { fill(buf, &resolution) };
+                        runtime.output_queue.enqueue(
+                            output_index,
+                            &mut fill_with_resolution,
+                            timestamp_us,
+                        )
                     }
                 }
                 EncodeInput::DmaBuf {

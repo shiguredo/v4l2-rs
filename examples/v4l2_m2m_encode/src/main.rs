@@ -334,7 +334,7 @@ fn main() -> Result<()> {
     for i in 0..args.frames {
         let timestamp_us = i as i64 * 33333;
         encoder.encode(
-            EncodeInput::Mmap(&mut |buf| {
+            EncodeInput::Mmap(&mut |buf, _resolution| {
                 let size = test_frame.len();
                 buf[..size].copy_from_slice(&test_frame);
                 Some(size)

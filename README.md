@@ -65,7 +65,7 @@ let timestamp_us = 0;
 let force_keyframe = false;
 let user_value = 123_u64;
 encoder.encode(
-    EncodeInput::Mmap(&mut |buf| {
+    EncodeInput::Mmap(&mut |buf, _resolution| {
         let size = yuv_data.len();
         buf[..size].copy_from_slice(&yuv_data);
         Some(size)
