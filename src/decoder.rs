@@ -363,24 +363,13 @@ impl<T: Send + 'static> H264Decoder<T> {
             .map_err(|_| crate::error::Error::PollerAborted)
     }
 
-    fn emit_callback(
-        callback: &mut DecoderCallback<T>,
-        output: crate::error::Result<DecodeCallbackOutput<T>>,
-    ) {
-        callback(output);
-    }
-
-    fn emit_error(callback: &mut DecoderCallback<T>, err: crate::error::Error) {
-        Self::emit_callback(callback, Err(err));
-    }
-
     fn handle_event(
         shared: &Arc<DecoderShared<T>>,
         callback: &mut DecoderCallback<T>,
         event: PollEvent,
     ) {
         for err in shared.drain_pending_async_errors() {
-            Self::emit_error(callback, err);
+            callback(Err(err));
         }
 
         match event {
@@ -388,7 +377,7 @@ impl<T: Send + 'static> H264Decoder<T> {
                 if let Ok(mut runtime) = shared.runtime.lock() {
                     runtime.output_queue.return_buffer(index);
                 } else {
-                    Self::emit_error(callback, crate::error::Error::PollerAborted);
+                    callback(Err(crate::error::Error::PollerAborted));
                 }
             }
             PollEvent::SourceChanged => Self::handle_source_change(shared, callback),
@@ -398,7 +387,7 @@ impl<T: Send + 'static> H264Decoder<T> {
                 flags: _,
                 timestamp,
             } => Self::handle_capture(shared, callback, index, bytesused, timestamp),
-            PollEvent::Error(err) => Self::emit_error(callback, err),
+            PollEvent::Error(err) => callback(Err(err)),
         }
     }
 
@@ -467,11 +456,8 @@ impl<T: Send + 'static> H264Decoder<T> {
         })();
 
         match resolution_result {
-            Ok(resolution) => Self::emit_callback(
-                callback,
-                Ok(DecodeCallbackOutput::ResolutionChanged { resolution }),
-            ),
-            Err(err) => Self::emit_error(callback, err),
+            Ok(resolution) => callback(Ok(DecodeCallbackOutput::ResolutionChanged { resolution })),
+            Err(err) => callback(Err(err)),
         }
     }
 
@@ -527,14 +513,14 @@ impl<T: Send + 'static> H264Decoder<T> {
 
         match dispatch {
             CaptureDispatch::Frame { frame, value } => {
-                Self::emit_callback(callback, Ok(DecodeCallbackOutput::Frame { frame, value }))
+                callback(Ok(DecodeCallbackOutput::Frame { frame, value }))
             }
             CaptureDispatch::Error { err, capture_queue } => {
-                Self::emit_error(callback, err);
+                callback(Err(err));
                 if let Some(capture_queue) = capture_queue
                     && let Err(requeue_err) = capture_queue.enqueue(index)
                 {
-                    Self::emit_error(callback, requeue_err);
+                    callback(Err(requeue_err));
                 }
             }
         }

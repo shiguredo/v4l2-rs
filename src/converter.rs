@@ -1,7 +1,7 @@
 //! 画像フォーマット変換器。
 //!
 //! V4L2 M2M デバイス (`/dev/video12`) を使用して、
-//! I420 と NV12 の相互変換を行う。
+//! 拡大縮小や I420 と NV12 の相互変換を行う。
 
 use std::collections::VecDeque;
 use std::os::fd::RawFd;
@@ -427,24 +427,13 @@ impl<T: Send + 'static> ImageConverter<T> {
         ));
     }
 
-    fn emit_callback(
-        callback: &mut ConverterCallback<T>,
-        output: crate::error::Result<ConvertCallbackOutput<T>>,
-    ) {
-        callback(output);
-    }
-
-    fn emit_error(callback: &mut ConverterCallback<T>, err: crate::error::Error) {
-        Self::emit_callback(callback, Err(err));
-    }
-
     fn handle_event(
         shared: &Arc<ConverterShared<T>>,
         callback: &mut ConverterCallback<T>,
         event: PollEvent,
     ) {
         for err in shared.drain_pending_async_errors() {
-            Self::emit_error(callback, err);
+            callback(Err(err));
         }
 
         match event {
@@ -452,7 +441,7 @@ impl<T: Send + 'static> ImageConverter<T> {
                 if let Ok(mut runtime) = shared.runtime.lock() {
                     runtime.output_queue.return_buffer(index);
                 } else {
-                    Self::emit_error(callback, crate::error::Error::PollerAborted);
+                    callback(Err(crate::error::Error::PollerAborted));
                 }
             }
             PollEvent::CaptureDequeued {
@@ -464,7 +453,7 @@ impl<T: Send + 'static> ImageConverter<T> {
             PollEvent::SourceChanged => {
                 // コンバーターでは発生しない。
             }
-            PollEvent::Error(err) => Self::emit_error(callback, err),
+            PollEvent::Error(err) => callback(Err(err)),
         }
     }
 
@@ -479,16 +468,16 @@ impl<T: Send + 'static> ImageConverter<T> {
             Ok(mut runtime) => {
                 let Some(value) = runtime.pending_values.pop_front() else {
                     drop(runtime);
-                    Self::emit_error(callback, crate::error::Error::NoAvailableBuffer);
+                    callback(Err(crate::error::Error::NoAvailableBuffer));
                     if let Err(requeue_err) = shared.capture_queue.enqueue(index) {
-                        Self::emit_error(callback, requeue_err);
+                        callback(Err(requeue_err));
                     }
                     return;
                 };
                 value
             }
             Err(_) => {
-                Self::emit_error(callback, crate::error::Error::PollerAborted);
+                callback(Err(crate::error::Error::PollerAborted));
                 return;
             }
         };
@@ -503,21 +492,18 @@ impl<T: Send + 'static> ImageConverter<T> {
         ) {
             Ok(frame) => frame,
             Err(err) => {
-                Self::emit_error(callback, err);
+                callback(Err(err));
                 if let Err(requeue_err) = capture_queue.enqueue(index) {
-                    Self::emit_error(callback, requeue_err);
+                    callback(Err(requeue_err));
                 }
                 return;
             }
         };
 
-        Self::emit_callback(
-            callback,
-            Ok(ConvertCallbackOutput::Frame {
-                frame,
-                value: pending_value,
-            }),
-        );
+        callback(Ok(ConvertCallbackOutput::Frame {
+            frame,
+            value: pending_value,
+        }));
     }
 
     fn validate_pixel_format(fmt: PixelFormat, name: &str) -> crate::error::Result<()> {
