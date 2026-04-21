@@ -61,7 +61,7 @@ pub enum ConvertInput<'a> {
     /// mmap 入力バッファを直接初期化するクロージャ。
     ///
     /// `None` を返した場合は `Error::MmapInputNotProduced` を返す。
-    Mmap(&'a mut dyn FnMut(&mut [u8]) -> Option<usize>),
+    Mmap(&'a mut dyn FnMut(&mut [u8], &Resolution) -> Option<usize>),
     /// DMABUF 入力バッファ。
     DmaBuf {
         fd: RawFd,
@@ -309,6 +309,7 @@ impl<T: Send + 'static> ImageConverter<T> {
     ) -> crate::error::Result<()> {
         let fd = self.device.raw_fd();
         let input_memory = self.shared.input_memory;
+        let input_resolution = self.shared.input_resolution;
         let mut needs_start = false;
 
         {
@@ -326,9 +327,13 @@ impl<T: Send + 'static> ImageConverter<T> {
                             reason: "converter is configured for DMABUF input".to_string(),
                         })
                     } else {
-                        runtime
-                            .output_queue
-                            .enqueue(output_index, fill, timestamp_us)
+                        let mut fill_with_resolution =
+                            |buf: &mut [u8]| -> Option<usize> { fill(buf, &input_resolution) };
+                        runtime.output_queue.enqueue(
+                            output_index,
+                            &mut fill_with_resolution,
+                            timestamp_us,
+                        )
                     }
                 }
                 ConvertInput::DmaBuf {

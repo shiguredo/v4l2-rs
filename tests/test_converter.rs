@@ -126,7 +126,7 @@ fn run_pipeline_test(case: TestCase) {
         pipeline
             .converter_in
             .convert(
-                ConvertInput::Mmap(&mut |buf| {
+                ConvertInput::Mmap(&mut |buf, _resolution| {
                     let size = source.len();
                     buf[..size].copy_from_slice(&source);
                     Some(size)
@@ -507,7 +507,7 @@ fn forward_decoded_to_converter_out(
             };
             converter_out
                 .convert(
-                    ConvertInput::Mmap(&mut |buf| {
+                    ConvertInput::Mmap(&mut |buf, _resolution| {
                         // SAFETY:
                         // src_ptr/src_len は next_value が保持する DecodedFrame の領域を指す。
                         // next_value はこの convert 呼び出しで保持されるため、このコピー中に解放されることは無い。
