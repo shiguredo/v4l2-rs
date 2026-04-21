@@ -3,6 +3,7 @@
 //! Raspberry Pi 向け V4L2 M2M (Memory-to-Memory) デバイスへのバインディング。
 
 mod buffer;
+mod converter;
 mod decoder;
 mod device;
 mod encoder;
@@ -17,6 +18,9 @@ pub(crate) mod sys;
 /// Raspberry Pi の `/dev/video11` (エンコーダー) と `/dev/video10` (デコーダー) を
 /// 操作するための汎用的な V4L2 M2M ラッパー。WebRTC には依存しない。
 pub mod v4l2_m2m {
+    pub use crate::converter::{
+        ConvertCallbackOutput, ConvertInput, ConvertedFrame, ConverterConfig, ImageConverter,
+    };
     pub use crate::decoder::{
         DecodeCallbackOutput, DecodeInput, DecodedFrame, DecoderConfig, H264Decoder,
     };

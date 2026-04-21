@@ -148,12 +148,14 @@ impl EncoderConfig {
     }
 }
 
+type EncodeMmapFill<'a, T> = dyn FnMut(&mut [u8], &Resolution, &T) -> Option<usize> + 'a;
+
 /// エンコーダーへの入力。
-pub enum EncodeInput<'a> {
+pub enum EncodeInput<'a, T> {
     /// MMAP 入力バッファを直接初期化するクロージャ。
     ///
     /// `None` を返した場合は `Error::MmapInputNotProduced` を返す。
-    Mmap(&'a mut dyn FnMut(&mut [u8], &Resolution) -> Option<usize>),
+    Mmap(&'a mut EncodeMmapFill<'a, T>),
     /// DMABUF ファイルディスクリプタ。
     DmaBuf {
         fd: RawFd,
@@ -425,7 +427,7 @@ impl<T: Send + 'static> H264Encoder<T> {
     /// フレームをエンキューする。
     pub fn encode(
         &mut self,
-        frame: EncodeInput<'_>,
+        frame: EncodeInput<'_, T>,
         timestamp_us: i64,
         force_keyframe: bool,
         value: T,
@@ -456,7 +458,7 @@ impl<T: Send + 'static> H264Encoder<T> {
                         })
                     } else {
                         let mut fill_with_resolution =
-                            |buf: &mut [u8]| -> Option<usize> { fill(buf, &resolution) };
+                            |buf: &mut [u8]| -> Option<usize> { fill(buf, &resolution, &value) };
                         runtime.output_queue.enqueue(
                             output_index,
                             &mut fill_with_resolution,
@@ -568,24 +570,13 @@ impl<T: Send + 'static> H264Encoder<T> {
         ));
     }
 
-    fn emit_callback(
-        callback: &mut EncoderCallback<T>,
-        output: crate::error::Result<EncodeCallbackOutput<T>>,
-    ) {
-        callback(output);
-    }
-
-    fn emit_error(callback: &mut EncoderCallback<T>, err: crate::error::Error) {
-        Self::emit_callback(callback, Err(err));
-    }
-
     fn handle_event(
         shared: &Arc<EncoderShared<T>>,
         callback: &mut EncoderCallback<T>,
         event: PollEvent,
     ) {
         for err in shared.drain_pending_async_errors() {
-            Self::emit_error(callback, err);
+            callback(Err(err));
         }
 
         match event {
@@ -593,7 +584,7 @@ impl<T: Send + 'static> H264Encoder<T> {
                 if let Ok(mut runtime) = shared.runtime.lock() {
                     runtime.output_queue.return_buffer(index);
                 } else {
-                    Self::emit_error(callback, crate::error::Error::PollerAborted);
+                    callback(Err(crate::error::Error::PollerAborted));
                 }
             }
             PollEvent::CaptureDequeued {
@@ -602,7 +593,7 @@ impl<T: Send + 'static> H264Encoder<T> {
                 flags,
                 timestamp,
             } => Self::handle_capture(shared, callback, index, bytesused, flags, timestamp),
-            PollEvent::Error(err) => Self::emit_error(callback, err),
+            PollEvent::Error(err) => callback(Err(err)),
             PollEvent::SourceChanged => {
                 // エンコーダーでは発生しない。
             }
@@ -621,16 +612,16 @@ impl<T: Send + 'static> H264Encoder<T> {
             Ok(mut runtime) => {
                 let Some(value) = runtime.pending_values.pop_front() else {
                     drop(runtime);
-                    Self::emit_error(callback, crate::error::Error::NoAvailableBuffer);
+                    callback(Err(crate::error::Error::NoAvailableBuffer));
                     if let Err(err) = shared.capture_queue.enqueue(index) {
-                        Self::emit_error(callback, err);
+                        callback(Err(err));
                     }
                     return;
                 };
                 value
             }
             Err(_) => {
-                Self::emit_error(callback, crate::error::Error::PollerAborted);
+                callback(Err(crate::error::Error::PollerAborted));
                 return;
             }
         };
@@ -646,21 +637,18 @@ impl<T: Send + 'static> H264Encoder<T> {
         ) {
             Ok(frame) => frame,
             Err(err) => {
-                Self::emit_error(callback, err);
+                callback(Err(err));
                 if let Err(requeue_err) = capture_queue.enqueue(index) {
-                    Self::emit_error(callback, requeue_err);
+                    callback(Err(requeue_err));
                 }
                 return;
             }
         };
 
-        Self::emit_callback(
-            callback,
-            Ok(EncodeCallbackOutput::Frame {
-                frame,
-                value: pending_value,
-            }),
-        );
+        callback(Ok(EncodeCallbackOutput::Frame {
+            frame,
+            value: pending_value,
+        }));
     }
 
     fn set_controls(fd: RawFd, config: &EncoderConfig) -> crate::error::Result<()> {
