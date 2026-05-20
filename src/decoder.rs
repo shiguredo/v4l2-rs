@@ -82,20 +82,22 @@ impl RequeueToken {
 /// デコードされたフレーム。
 ///
 /// このハンドルが `Drop` されると、内部 CAPTURE バッファが自動再キューされる。
-pub struct DecodedFrame {
+pub struct DecodedFrame<T> {
     requeue: Option<RequeueToken>,
     index: u32,
     bytesused: u32,
     timestamp_us: i64,
+    user_data: T,
 }
 
-impl DecodedFrame {
+impl<T> DecodedFrame<T> {
     fn new(
         capture_queue: Arc<CaptureQueue>,
         pending_async_errors: Arc<Mutex<VecDeque<crate::error::Error>>>,
         index: u32,
         bytesused: u32,
         timestamp: Timestamp,
+        user_data: T,
     ) -> crate::error::Result<Self> {
         let capacity = capture_queue.buffers().plane(index, 0).length as usize;
         let bytesused_usize = bytesused as usize;
@@ -115,6 +117,7 @@ impl DecodedFrame {
             index,
             bytesused,
             timestamp_us: timestamp.tv_sec * 1_000_000 + timestamp.tv_usec,
+            user_data,
         })
     }
 
@@ -154,9 +157,14 @@ impl DecodedFrame {
     pub fn timestamp_us(&self) -> i64 {
         self.timestamp_us
     }
+
+    /// ユーザーデータを返す。
+    pub fn user_data(&self) -> &T {
+        &self.user_data
+    }
 }
 
-impl Drop for DecodedFrame {
+impl<T> Drop for DecodedFrame<T> {
     fn drop(&mut self) {
         if let Some(token) = self.requeue.take() {
             token.requeue();
@@ -164,15 +172,54 @@ impl Drop for DecodedFrame {
     }
 }
 
-/// デコーダーのコールバック出力。
-pub enum DecodeCallbackOutput<T> {
-    /// デコードされたフレーム。
-    Frame { frame: DecodedFrame, value: T },
-    /// 解像度が変更された。
-    ResolutionChanged { resolution: Resolution },
+/// デコード結果を通知するためのハンドラー
+///
+/// デコード処理が完了するたびに [`DecodeHandler::on_decoded`] が呼ばれる。
+/// 解像度が変更された場合は [`DecodeHandler::on_resolution_changed`] が呼ばれる。
+pub trait DecodeHandler: Send + 'static {
+    /// ユーザーデータ型
+    type UserData: Send + 'static;
+    /// エラー型
+    type Error: From<crate::error::Error> + Send + 'static;
+    /// デコード完了時に呼ばれる
+    fn on_decoded(&mut self, result: Result<DecodedFrame<Self::UserData>, Self::Error>);
+    /// 解像度変更時に呼ばれる
+    fn on_resolution_changed(&mut self, resolution: Resolution);
 }
 
-type DecoderCallback<T> = dyn FnMut(crate::error::Result<DecodeCallbackOutput<T>>) + Send;
+/// `FnMut` クロージャを [`DecodeHandler`] にするラッパー
+pub struct FnDecodeHandler<T, E = crate::error::Error> {
+    f: Box<dyn FnMut(Result<DecodedFrame<T>, E>) + Send + 'static>,
+    on_res_change: Box<dyn FnMut(Resolution) + Send + 'static>,
+}
+
+impl<T, E> FnDecodeHandler<T, E> {
+    pub fn new<F, G>(f: F, on_resolution_changed: G) -> Self
+    where
+        F: FnMut(Result<DecodedFrame<T>, E>) + Send + 'static,
+        G: FnMut(Resolution) + Send + 'static,
+    {
+        Self {
+            f: Box::new(f),
+            on_res_change: Box::new(on_resolution_changed),
+        }
+    }
+}
+
+impl<T, E> DecodeHandler for FnDecodeHandler<T, E>
+where
+    T: Send + 'static,
+    E: From<crate::error::Error> + Send + 'static,
+{
+    type UserData = T;
+    type Error = E;
+    fn on_decoded(&mut self, result: Result<DecodedFrame<T>, E>) {
+        (self.f)(result);
+    }
+    fn on_resolution_changed(&mut self, resolution: Resolution) {
+        (self.on_res_change)(resolution);
+    }
+}
 
 struct DecoderRuntime<T> {
     output_queue: OutputQueue,
@@ -205,18 +252,15 @@ impl<T> DecoderShared<T> {
 ///
 /// フィールド宣言順序は Drop 順序に影響する。
 /// `device` (fd) はキューやポーラーより後に Drop されなければならない。
-pub struct H264Decoder<T> {
+pub struct H264Decoder<H: DecodeHandler> {
     poller: Option<Poller>,
-    shared: Arc<DecoderShared<T>>,
+    shared: Arc<DecoderShared<H::UserData>>,
     device: Device,
 }
 
-impl<T: Send + 'static> H264Decoder<T> {
+impl<H: DecodeHandler> H264Decoder<H> {
     /// デコーダーを初期化する。
-    pub fn new<F>(config: DecoderConfig, callback: F) -> crate::error::Result<Self>
-    where
-        F: FnMut(crate::error::Result<DecodeCallbackOutput<T>>) + Send + 'static,
-    {
+    pub fn new(config: DecoderConfig, mut handler: H) -> crate::error::Result<Self> {
         let device = Device::open(&config.device_path)?;
         let fd = device.raw_fd();
 
@@ -267,8 +311,7 @@ impl<T: Send + 'static> H264Decoder<T> {
             pending_async_errors: Arc::new(Mutex::new(VecDeque::new())),
         });
 
-        // callback は poller スレッドのクロージャーが単独所有する。
-        let mut callback = Box::new(callback) as Box<DecoderCallback<T>>;
+        // handler は poller スレッドのクロージャーが単独所有する。
         let poller_shared = shared.clone();
         let poller = Poller::start(
             PollerConfig {
@@ -279,7 +322,7 @@ impl<T: Send + 'static> H264Decoder<T> {
                 capture_memory: sys::V4L2_MEMORY_MMAP,
                 subscribe_events,
             },
-            move |event| Self::handle_event(&poller_shared, callback.as_mut(), event),
+            move |event| Self::handle_event(&poller_shared, &mut handler, event),
         );
 
         Ok(H264Decoder {
@@ -292,9 +335,9 @@ impl<T: Send + 'static> H264Decoder<T> {
     /// H.264 データをデコードキューへ投入する。
     pub fn decode(
         &mut self,
-        input: DecodeInput<'_, T>,
+        input: DecodeInput<'_, H::UserData>,
         timestamp_us: i64,
-        value: T,
+        user_data: H::UserData,
     ) -> crate::error::Result<()> {
         let input_memory = self.shared.input_memory;
         let mut runtime = self.lock_runtime()?;
@@ -311,11 +354,13 @@ impl<T: Send + 'static> H264Decoder<T> {
                         reason: "decoder is configured for DMABUF input".to_string(),
                     })
                 } else {
-                    let mut fill_with_value =
-                        |buf: &mut [u8]| -> Option<usize> { fill(buf, &value) };
-                    runtime
-                        .output_queue
-                        .enqueue(output_index, &mut fill_with_value, timestamp_us)
+                    let mut fill_with_user_data =
+                        |buf: &mut [u8]| -> Option<usize> { fill(buf, &user_data) };
+                    runtime.output_queue.enqueue(
+                        output_index,
+                        &mut fill_with_user_data,
+                        timestamp_us,
+                    )
                 }
             }
             DecodeInput::DmaBuf {
@@ -344,7 +389,7 @@ impl<T: Send + 'static> H264Decoder<T> {
             return Err(err);
         }
 
-        runtime.pending_values.push_back(value);
+        runtime.pending_values.push_back(user_data);
         Ok(())
     }
 
@@ -356,20 +401,16 @@ impl<T: Send + 'static> H264Decoder<T> {
         }
     }
 
-    fn lock_runtime(&self) -> crate::error::Result<MutexGuard<'_, DecoderRuntime<T>>> {
+    fn lock_runtime(&self) -> crate::error::Result<MutexGuard<'_, DecoderRuntime<H::UserData>>> {
         self.shared
             .runtime
             .lock()
             .map_err(|_| crate::error::Error::PollerAborted)
     }
 
-    fn handle_event(
-        shared: &Arc<DecoderShared<T>>,
-        callback: &mut DecoderCallback<T>,
-        event: PollEvent,
-    ) {
+    fn handle_event(shared: &Arc<DecoderShared<H::UserData>>, handler: &mut H, event: PollEvent) {
         for err in shared.drain_pending_async_errors() {
-            callback(Err(err));
+            handler.on_decoded(Err(err.into()));
         }
 
         match event {
@@ -377,21 +418,21 @@ impl<T: Send + 'static> H264Decoder<T> {
                 if let Ok(mut runtime) = shared.runtime.lock() {
                     runtime.output_queue.return_buffer(index);
                 } else {
-                    callback(Err(crate::error::Error::PollerAborted));
+                    handler.on_decoded(Err(crate::error::Error::PollerAborted.into()));
                 }
             }
-            PollEvent::SourceChanged => Self::handle_source_change(shared, callback),
+            PollEvent::SourceChanged => Self::handle_source_change(shared, handler),
             PollEvent::CaptureDequeued {
                 index,
                 bytesused,
                 flags: _,
                 timestamp,
-            } => Self::handle_capture(shared, callback, index, bytesused, timestamp),
-            PollEvent::Error(err) => callback(Err(err)),
+            } => Self::handle_capture(shared, handler, index, bytesused, timestamp),
+            PollEvent::Error(err) => handler.on_decoded(Err(err.into())),
         }
     }
 
-    fn handle_source_change(shared: &Arc<DecoderShared<T>>, callback: &mut DecoderCallback<T>) {
+    fn handle_source_change(shared: &Arc<DecoderShared<H::UserData>>, handler: &mut H) {
         let resolution_result = (|| -> crate::error::Result<Resolution> {
             let fd = shared.fd;
             let mut runtime = shared
@@ -456,22 +497,21 @@ impl<T: Send + 'static> H264Decoder<T> {
         })();
 
         match resolution_result {
-            Ok(resolution) => callback(Ok(DecodeCallbackOutput::ResolutionChanged { resolution })),
-            Err(err) => callback(Err(err)),
+            Ok(resolution) => handler.on_resolution_changed(resolution),
+            Err(err) => handler.on_decoded(Err(err.into())),
         }
     }
 
     fn handle_capture(
-        shared: &Arc<DecoderShared<T>>,
-        callback: &mut DecoderCallback<T>,
+        shared: &Arc<DecoderShared<H::UserData>>,
+        handler: &mut H,
         index: u32,
         bytesused: u32,
         timestamp: Timestamp,
     ) {
         enum CaptureDispatch<U> {
             Frame {
-                frame: DecodedFrame,
-                value: U,
+                frame: DecodedFrame<U>,
             },
             Error {
                 err: crate::error::Error,
@@ -479,7 +519,7 @@ impl<T: Send + 'static> H264Decoder<T> {
             },
         }
 
-        let dispatch = match shared.runtime.lock() {
+        let dispatch: CaptureDispatch<H::UserData> = match shared.runtime.lock() {
             Ok(mut runtime) => {
                 let capture_queue = runtime.capture_queue.clone();
                 match capture_queue.clone() {
@@ -492,14 +532,15 @@ impl<T: Send + 'static> H264Decoder<T> {
                             err: crate::error::Error::NoAvailableBuffer,
                             capture_queue,
                         },
-                        Some(value) => match DecodedFrame::new(
+                        Some(user_data) => match DecodedFrame::new(
                             capture_queue_for_frame,
                             shared.pending_async_errors.clone(),
                             index,
                             bytesused,
                             timestamp,
+                            user_data,
                         ) {
-                            Ok(frame) => CaptureDispatch::Frame { frame, value },
+                            Ok(frame) => CaptureDispatch::Frame { frame },
                             Err(err) => CaptureDispatch::Error { err, capture_queue },
                         },
                     },
@@ -512,15 +553,15 @@ impl<T: Send + 'static> H264Decoder<T> {
         };
 
         match dispatch {
-            CaptureDispatch::Frame { frame, value } => {
-                callback(Ok(DecodeCallbackOutput::Frame { frame, value }))
+            CaptureDispatch::Frame { frame } => {
+                handler.on_decoded(Ok(frame));
             }
             CaptureDispatch::Error { err, capture_queue } => {
-                callback(Err(err));
+                handler.on_decoded(Err(err.into()));
                 if let Some(capture_queue) = capture_queue
                     && let Err(requeue_err) = capture_queue.enqueue(index)
                 {
-                    callback(Err(requeue_err));
+                    handler.on_decoded(Err(requeue_err.into()));
                 }
             }
         }
@@ -537,7 +578,7 @@ impl<T: Send + 'static> H264Decoder<T> {
     }
 }
 
-impl<T> Drop for H264Decoder<T> {
+impl<H: DecodeHandler> Drop for H264Decoder<H> {
     fn drop(&mut self) {
         // Poller を先に停止
         if let Some(ref mut poller) = self.poller {

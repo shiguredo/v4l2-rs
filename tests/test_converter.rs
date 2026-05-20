@@ -4,9 +4,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use shiguredo_v4l2::v4l2_m2m::{
-    ConvertCallbackOutput, ConvertInput, ConvertedFrame, ConverterConfig, DecodeCallbackOutput,
-    DecodeInput, DecodedFrame, DecoderConfig, EncodeCallbackOutput, EncodeInput, EncodedFrame,
-    EncoderConfig, H264Decoder, H264Encoder, ImageConverter, Memory, PixelFormat, Resolution,
+    ConvertCallbackOutput, ConvertInput, ConvertedFrame, ConverterConfig, DecodeInput,
+    DecodedFrame, DecoderConfig, EncodeInput, EncodedFrame, EncoderConfig, FnDecodeHandler,
+    FnEncodeHandler, H264Decoder, H264Encoder, ImageConverter, Memory, PixelFormat, Resolution,
 };
 
 const FRAME_COUNT: usize = 10;
@@ -79,13 +79,13 @@ struct EncoderValue {
 // decoder callback まで EncodedFrame の寿命を保持する。
 struct DecoderValue {
     value: i64,
-    encoded: EncodedFrame,
+    encoded: EncodedFrame<EncoderValue>,
 }
 
 // converter_out callback まで DecodedFrame の寿命を保持する。
 struct ConverterOutValue {
     value: i64,
-    decoded: DecodedFrame,
+    decoded: DecodedFrame<DecoderValue>,
 }
 
 // 全て MMAP を利用してパイプラインを構築するケース
@@ -254,28 +254,32 @@ fn build_pipeline(case: TestCase) -> Pipeline {
     // 後段コンポーネントを callback が所有し、同一スレッド上で直列に中継する。
     let mut converter_out = converter_out;
     let converter_out_input = case.converter_out_input;
-    let decoder = H264Decoder::new(decoder_config, move |result| match result {
-        Ok(DecodeCallbackOutput::ResolutionChanged { .. }) => {
-            // 本テストでは通知を受理するだけで追加処理はしない。
-        }
-        Ok(DecodeCallbackOutput::Frame { frame, value }) => {
-            if let Err(err) = forward_decoded_to_converter_out(
-                &mut converter_out,
-                converter_out_input,
-                frame,
-                value,
-            ) {
-                let _ = result_tx_decoder.send(PipelineEvent::Error(format!(
-                    "decoder から converter_out への転送に失敗しました: {err}"
-                )));
-            }
-        }
-        Err(err) => {
-            let _ = result_tx_decoder.send(PipelineEvent::Error(format!(
-                "decoder callback エラー: {err}"
-            )));
-        }
-    })
+    let decoder = H264Decoder::new(
+        decoder_config,
+        FnDecodeHandler::new(
+            move |result| match result {
+                Ok(frame) => {
+                    if let Err(err) = forward_decoded_to_converter_out(
+                        &mut converter_out,
+                        converter_out_input,
+                        frame,
+                    ) {
+                        let _ = result_tx_decoder.send(PipelineEvent::Error(format!(
+                            "decoder から converter_out への転送に失敗しました: {err}"
+                        )));
+                    }
+                }
+                Err(err) => {
+                    let _ = result_tx_decoder.send(PipelineEvent::Error(format!(
+                        "decoder callback エラー: {err}"
+                    )));
+                }
+            },
+            |_resolution| {
+                // 本テストでは通知を受理するだけで追加処理はしない。
+            },
+        ),
+    )
     .expect("decoder の初期化に失敗しました");
 
     // Stage 2: NV12 720p -> H264
@@ -290,21 +294,23 @@ fn build_pipeline(case: TestCase) -> Pipeline {
     // decoder も同様に callback が所有する。
     let mut decoder = decoder;
     let decoder_input = case.decoder_input;
-    let encoder = H264Encoder::new(encoder_config, move |result| match result {
-        Ok(EncodeCallbackOutput::Frame { frame, value }) => {
-            if let Err(err) = forward_encoded_to_decoder(&mut decoder, decoder_input, frame, value)
-            {
+    let encoder = H264Encoder::new(
+        encoder_config,
+        FnEncodeHandler::new(move |result| match result {
+            Ok(frame) => {
+                if let Err(err) = forward_encoded_to_decoder(&mut decoder, decoder_input, frame) {
+                    let _ = result_tx_encoder.send(PipelineEvent::Error(format!(
+                        "encoder から decoder への転送に失敗しました: {err}"
+                    )));
+                }
+            }
+            Err(err) => {
                 let _ = result_tx_encoder.send(PipelineEvent::Error(format!(
-                    "encoder から decoder への転送に失敗しました: {err}"
+                    "encoder callback エラー: {err}"
                 )));
             }
-        }
-        Err(err) => {
-            let _ = result_tx_encoder.send(PipelineEvent::Error(format!(
-                "encoder callback エラー: {err}"
-            )));
-        }
-    })
+        }),
+    )
     .expect("encoder の初期化に失敗しました");
 
     // Stage 1: I420 1080p -> NV12 720p
@@ -346,7 +352,7 @@ fn build_pipeline(case: TestCase) -> Pipeline {
 }
 
 fn forward_converted_to_encoder(
-    encoder: &mut H264Encoder<EncoderValue>,
+    encoder: &mut H264Encoder<FnEncodeHandler<EncoderValue>>,
     encoder_input: Memory,
     frame: ConvertedFrame,
     value: i64,
@@ -364,8 +370,8 @@ fn forward_converted_to_encoder(
             };
             encoder
                 .encode(
-                    EncodeInput::Mmap(&mut |buf, _resolution, value| {
-                        let src = value
+                    EncodeInput::Mmap(&mut |buf, _resolution, user_data| {
+                        let src = user_data
                             .converted
                             .data()
                             .expect("converter_in が MMAP でないデータを返しました");
@@ -410,14 +416,13 @@ fn forward_converted_to_encoder(
 }
 
 fn forward_encoded_to_decoder(
-    decoder: &mut H264Decoder<DecoderValue>,
+    decoder: &mut H264Decoder<FnDecodeHandler<DecoderValue>>,
     decoder_input: Memory,
-    frame: EncodedFrame,
-    value: EncoderValue,
+    frame: EncodedFrame<EncoderValue>,
 ) -> Result<(), String> {
     // encoder 出力のタイムスタンプをそのまま decoder 入力へ伝播する。
     let timestamp_us = frame.timestamp_us();
-    let frame_no = value.value;
+    let frame_no = frame.user_data().value;
 
     match decoder_input {
         Memory::Mmap => {
@@ -428,8 +433,8 @@ fn forward_encoded_to_decoder(
             };
             decoder
                 .decode(
-                    DecodeInput::Mmap(&mut |buf, value| {
-                        let src = value
+                    DecodeInput::Mmap(&mut |buf, user_data| {
+                        let src = user_data
                             .encoded
                             .data()
                             .expect("encoder が MMAP でないデータを返しました");
@@ -473,12 +478,11 @@ fn forward_encoded_to_decoder(
 fn forward_decoded_to_converter_out(
     converter_out: &mut ImageConverter<ConverterOutValue>,
     converter_out_input: Memory,
-    frame: DecodedFrame,
-    value: DecoderValue,
+    frame: DecodedFrame<DecoderValue>,
 ) -> Result<(), String> {
     // decoder 出力を最終 converter へ受け渡す。
     let timestamp_us = frame.timestamp_us();
-    let frame_no = value.value;
+    let frame_no = frame.user_data().value;
 
     match converter_out_input {
         Memory::Mmap => {
@@ -489,8 +493,8 @@ fn forward_decoded_to_converter_out(
             };
             converter_out
                 .convert(
-                    ConvertInput::Mmap(&mut |buf, _resolution, value| {
-                        let src = value
+                    ConvertInput::Mmap(&mut |buf, _resolution, user_data| {
+                        let src = user_data
                             .decoded
                             .data()
                             .expect("decoder が MMAP でないデータを返しました");

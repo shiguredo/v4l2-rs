@@ -5,7 +5,9 @@
 use std::fs;
 
 use shiguredo_v4l2::v4l2_m2m;
-use shiguredo_v4l2::v4l2_m2m::{DecoderConfig, EncoderConfig, H264Decoder, H264Encoder};
+use shiguredo_v4l2::v4l2_m2m::{
+    DecoderConfig, EncoderConfig, FnDecodeHandler, FnEncodeHandler, H264Decoder, H264Encoder,
+};
 
 #[derive(Debug)]
 enum Error {
@@ -128,7 +130,7 @@ fn main() -> Result<()> {
                 device_path: args.encoder_device.clone(),
                 ..config
             };
-            match H264Encoder::<()>::new(config, |_| {}) {
+            match H264Encoder::new(config, FnEncodeHandler::<()>::new(|_| {})) {
                 Ok(_) => println!("OK"),
                 Err(e) => {
                     println!("NG ({e})");
@@ -150,7 +152,7 @@ fn main() -> Result<()> {
                 device_path: args.decoder_device.clone(),
                 ..DecoderConfig::new()
             };
-            match H264Decoder::<()>::new(config, |_| {}) {
+            match H264Decoder::new(config, FnDecodeHandler::<()>::new(|_| {}, |_| {})) {
                 Ok(_) => println!("OK"),
                 Err(e) => {
                     println!("NG ({e})");

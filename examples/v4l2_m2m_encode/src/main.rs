@@ -12,7 +12,7 @@ use shiguredo_mp4::boxes::{Avc1Box, AvccBox, SampleEntry, VisualSampleEntryField
 use shiguredo_mp4::mux::{Mp4FileMuxer, MuxError, Sample};
 use shiguredo_mp4::{TrackKind, Uint};
 use shiguredo_v4l2::v4l2_m2m;
-use shiguredo_v4l2::v4l2_m2m::{EncodeCallbackOutput, EncodeInput, EncoderConfig, H264Encoder};
+use shiguredo_v4l2::v4l2_m2m::{EncodeInput, EncoderConfig, FnEncodeHandler, H264Encoder};
 
 const NAL_TYPE_SPS: u8 = 7;
 const NAL_TYPE_PPS: u8 = 8;
@@ -294,21 +294,29 @@ fn main() -> Result<()> {
     let width = config.width;
     let height = config.height;
     let (encode_tx, encode_rx) = mpsc::channel::<std::result::Result<OwnedEncodedFrame, String>>();
-    let mut encoder = H264Encoder::new(config, move |result| {
-        let mapped = match result {
-            Ok(EncodeCallbackOutput::Frame { frame, value }) => match frame.data() {
-                Some(data) => Ok(OwnedEncodedFrame {
-                    data: data.to_vec(),
-                    is_keyframe: frame.is_keyframe(),
-                    timestamp_us: frame.timestamp_us(),
-                    value,
-                }),
-                None => Err("encoder output is DMABUF in this sample".to_string()),
-            },
-            Err(err) => Err(format!("{err}")),
-        };
-        let _ = encode_tx.send(mapped);
-    })?;
+    let mut encoder = H264Encoder::new(
+        config,
+        FnEncodeHandler::<u64>::new(move |result| {
+            let mapped = match result {
+                Ok(frame) => {
+                    let timestamp_us = frame.timestamp_us();
+                    let is_keyframe = frame.is_keyframe();
+                    let user_data = *frame.user_data();
+                    match frame.data() {
+                        Some(data) => Ok(OwnedEncodedFrame {
+                            data: data.to_vec(),
+                            is_keyframe,
+                            timestamp_us,
+                            value: user_data,
+                        }),
+                        None => Err("encoder output is DMABUF in this sample".to_string()),
+                    }
+                }
+                Err(err) => Err(format!("{err}")),
+            };
+            let _ = encode_tx.send(mapped);
+        }),
+    )?;
 
     let test_frame = generate_test_frame(width, height);
 
