@@ -16,7 +16,7 @@ use shiguredo_libcamera::{
 use shiguredo_mp4::boxes::{Avc1Box, AvccBox, SampleEntry, VisualSampleEntryFields};
 use shiguredo_mp4::mux::{Mp4FileMuxer, MuxError, Sample};
 use shiguredo_mp4::{TrackKind, Uint};
-use shiguredo_v4l2::v4l2_m2m::{EncodeCallbackOutput, EncodeInput, EncoderConfig, H264Encoder};
+use shiguredo_v4l2::v4l2_m2m::{EncodeInput, EncoderConfig, FnEncodeHandler, H264Encoder};
 
 const NAL_TYPE_SPS: u8 = 7;
 const NAL_TYPE_PPS: u8 = 8;
@@ -353,20 +353,27 @@ fn main() -> Result<()> {
         ..EncoderConfig::new(actual_width, actual_height, args.bitrate_kbps * 1000)
     };
     let (encode_tx, encode_rx) = mpsc::channel::<std::result::Result<OwnedEncodedFrame, String>>();
-    let mut encoder = H264Encoder::new(encoder_config, move |result| {
-        let mapped = match result {
-            Ok(EncodeCallbackOutput::Frame { frame, value }) => match frame.data() {
-                Some(data) => Ok(OwnedEncodedFrame {
-                    data: data.to_vec(),
-                    is_keyframe: frame.is_keyframe(),
-                    value,
-                }),
-                None => Err("encoder output is DMABUF in this sample".to_string()),
-            },
-            Err(err) => Err(format!("{err}")),
-        };
-        let _ = encode_tx.send(mapped);
-    })?;
+    let mut encoder = H264Encoder::new(
+        encoder_config,
+        FnEncodeHandler::<u64>::new(move |result| {
+            let mapped = match result {
+                Ok(frame) => {
+                    let is_keyframe = frame.is_keyframe();
+                    let user_data = *frame.user_data();
+                    match frame.data() {
+                        Some(data) => Ok(OwnedEncodedFrame {
+                            data: data.to_vec(),
+                            is_keyframe,
+                            value: user_data,
+                        }),
+                        None => Err("encoder output is DMABUF in this sample".to_string()),
+                    }
+                }
+                Err(err) => Err(format!("{err}")),
+            };
+            let _ = encode_tx.send(mapped);
+        }),
+    )?;
     println!("エンコーダー初期化完了: デバイス={}", args.encoder_device);
 
     // 9. FrameBufferAllocator

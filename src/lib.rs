@@ -22,11 +22,11 @@ pub mod v4l2_m2m {
         ConvertCallbackOutput, ConvertInput, ConvertedFrame, ConverterConfig, ImageConverter,
     };
     pub use crate::decoder::{
-        DecodeCallbackOutput, DecodeInput, DecodedFrame, DecoderConfig, H264Decoder,
+        DecodeHandler, DecodeInput, DecodedFrame, DecoderConfig, FnDecodeHandler, H264Decoder,
     };
     pub use crate::encoder::{
-        EncodeCallbackOutput, EncodeInput, EncodedFrame, EncoderConfig, H264Encoder, H264Level,
-        H264Profile,
+        EncodeHandler, EncodeInput, EncodedFrame, EncoderConfig, FnEncodeHandler, H264Encoder,
+        H264Level, H264Profile,
     };
     pub use crate::error::{Error, Result};
     pub use crate::format::{Memory, PixelFormat, Resolution};
