@@ -1,4 +1,4 @@
-.PHONY: sysroot test cover pbt pbt-cover fuzz fuzzing fuzzing-parallel fuzzing-list check clippy fmt clean
+.PHONY: sysroot test cover pbt pbt-cover fuzz fuzzing fuzzing-parallel fuzzing-list check clippy fmt clean container-build
 
 # sysroot を構築する
 sysroot:
@@ -49,16 +49,16 @@ fuzzing-list:
 check:
 	cargo check --workspace
 
-# cargo clippy を実行する
-# container CLI が使える環境では Apple Container 経由で aarch64 向けに実行する
-# 無い環境（CI の Linux など）ではホストで直接実行する
+# cargo clippy を実行する（ホスト直接実行）
 clippy:
-	@if command -v container >/dev/null 2>&1; then \
-		container run --rm -v "$$(pwd):/workspace" -w /workspace v4l2-ci-check \
-			cargo clippy --workspace --target aarch64-unknown-linux-gnu -- -D warnings; \
-	else \
-		cargo clippy --workspace --all-targets -- -D warnings; \
-	fi
+	cargo clippy --workspace -- -D warnings
+
+# macOS から prek の cargo clippy を Linux コンテナで動かすためのイメージをビルドする
+# 使い方:
+#   make container-build  (初回・Dockerfile.check 更新時に実行)
+#   prek run cargo-clippy (コンテナ上で aarch64 ターゲットの clippy が走る)
+container-build:
+	container build -t v4l2-ci-check -f Dockerfile.check .
 
 # cargo fmt を実行する
 fmt:

@@ -19,9 +19,10 @@ brew services start container
 ## 検証用イメージのビルド
 
 ```bash
-container build -t v4l2-ci-check -f Dockerfile.check .
+make build-container
 ```
 
+内部では `container build -t v4l2-ci-check -f Dockerfile.check .` を実行します。
 イメージにはソースコードを焼き込まず、aarch64 用 sysroot とクロスツールチェーンのみが含まれます。
 ソースを編集してもイメージの再ビルドは不要で、実行時にホストの作業ツリーをマウントして使います。
 
@@ -40,11 +41,11 @@ container run --rm -v "$(pwd):/workspace" -w /workspace v4l2-ci-check cargo chec
 container run --rm -v "$(pwd):/workspace" -w /workspace v4l2-ci-check cargo test --workspace --target aarch64-unknown-linux-gnu
 ```
 
-## prek / make からの利用
+## prek フックからの利用
 
-`make clippy` は `command -v container` で判定し、container CLI があればこのイメージ経由で
-aarch64 向け clippy を実行し、無ければホストで直接 clippy を実行します。
-`prek.toml` の `cargo-clippy` フックも `make clippy` を呼び出すだけで同じ挙動になります。
+`prek.toml` の `cargo-clippy` フックは `command -v container` で判定し、container CLI があれば
+このイメージ経由で aarch64 向け clippy を実行し、無ければホストでそのまま clippy を実行します。
+イメージのビルド / 再ビルドは `make build-container` で行います。
 
 ## 注意事項
 
