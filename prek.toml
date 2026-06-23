@@ -37,7 +37,8 @@ hooks = [
   {
     id = "cargo-clippy",
     name = "cargo clippy",
-    entry = "cargo clippy --workspace --all-targets -- -D warnings",
+    # container CLI の有無による分岐は Makefile 側 (`make clippy`) に集約する
+    entry = "make clippy",
     language = "system",
     types = ["rust"],
     pass_filenames = false,

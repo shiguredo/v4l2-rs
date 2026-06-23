@@ -50,8 +50,15 @@ check:
 	cargo check --workspace
 
 # cargo clippy を実行する
+# container CLI が使える環境では Apple Container 経由で aarch64 向けに実行する
+# 無い環境（CI の Linux など）ではホストで直接実行する
 clippy:
-	cargo clippy --workspace -- -D warnings
+	@if command -v container >/dev/null 2>&1; then \
+		container run --rm -v "$$(pwd):/workspace" -w /workspace v4l2-ci-check \
+			cargo clippy --workspace --target aarch64-unknown-linux-gnu -- -D warnings; \
+	else \
+		cargo clippy --workspace --all-targets -- -D warnings; \
+	fi
 
 # cargo fmt を実行する
 fmt:
