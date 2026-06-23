@@ -8,5 +8,5 @@ publish = false
 libc = "0.2"
 noargs = "0.4"
 shiguredo_libcamera = "2026.1.0-canary.1"
-shiguredo_mp4 = "2026.2.0-canary.3"
+shiguredo_mp4 = "2026.3.0"
 shiguredo_v4l2 = { path = "../.." }
