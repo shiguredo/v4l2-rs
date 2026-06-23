@@ -1,0 +1,12 @@
+[package]
+name = "v4l2_m2m_libcamera_encode"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+libc = "0.2"
+noargs = "0.4"
+shiguredo_libcamera = "2026.1.0"
+shiguredo_mp4 = "2026.3.0"
+shiguredo_v4l2 = { path = "../.." }

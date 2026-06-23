@@ -1,0 +1,125 @@
+name: ci
+
+on:
+  push:
+    paths:
+      - "src/**"
+      - "examples/**"
+      - "pbt/**"
+      - "sysroot/**"
+      - "Cargo.toml"
+      - ".github/workflows/ci.yml"
+  schedule:
+    # JST 11:00 (UTC 02:00), 月-金
+    - cron: "0 2 * * 1-5"
+
+jobs:
+  build:
+    name: Build (aarch64)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      SYSROOT_PATH: ${{ github.workspace }}/target/shiguredo-sysroot/raspberry-pi-os_armv8/sysroot
+      PKG_CONFIG_ALLOW_CROSS: "1"
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - run: rustup update stable
+      - run: rustup target add aarch64-unknown-linux-gnu
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential \
+            libclang-dev \
+            clang \
+            debian-archive-keyring \
+            gcc-aarch64-linux-gnu \
+            g++-aarch64-linux-gnu
+          # cargo-shiguredo-sysroot は独自 apt 設定で sources.list のみ差し替えるため、
+          # Debian の keyring を trusted.gpg.d に配置しないと trixie の署名検証に失敗する。
+          sudo install -Dm644 /usr/share/keyrings/debian-archive-keyring.gpg \
+            /etc/apt/trusted.gpg.d/debian-archive-keyring.gpg
+          # Raspberry Pi アーカイブの keyring をインストールし trusted.gpg.d に配置する
+          curl -fsSL http://archive.raspberrypi.com/debian/pool/main/r/raspberrypi-archive-keyring/raspberrypi-archive-keyring_2021.1.1+rpt1_all.deb \
+            -o /tmp/rpi-keyring.deb && sudo dpkg -i /tmp/rpi-keyring.deb && rm /tmp/rpi-keyring.deb
+          sudo install -Dm644 /usr/share/keyrings/raspberrypi-archive-keyring.gpg \
+            /etc/apt/trusted.gpg.d/raspberrypi-archive-keyring.gpg
+      - name: Install cargo-shiguredo-sysroot
+        run: cargo install shiguredo_sysroot
+      - name: Install sysroot
+        run: cargo shiguredo-sysroot --config sysroot/raspberry-pi-os_armv8.json
+      - run: cargo fmt --all --check
+      - name: Check
+        env:
+          PKG_CONFIG_SYSROOT_DIR: ${{ env.SYSROOT_PATH }}
+          PKG_CONFIG_LIBDIR: ${{ env.SYSROOT_PATH }}/usr/lib/aarch64-linux-gnu/pkgconfig:${{ env.SYSROOT_PATH }}/usr/share/pkgconfig
+          BINDGEN_EXTRA_CLANG_ARGS_aarch64_unknown_linux_gnu: "--target=aarch64-linux-gnu --sysroot=${{ env.SYSROOT_PATH }}"
+        run: cargo check --workspace --target aarch64-unknown-linux-gnu
+      - name: Clippy
+        env:
+          PKG_CONFIG_SYSROOT_DIR: ${{ env.SYSROOT_PATH }}
+          PKG_CONFIG_LIBDIR: ${{ env.SYSROOT_PATH }}/usr/lib/aarch64-linux-gnu/pkgconfig:${{ env.SYSROOT_PATH }}/usr/share/pkgconfig
+          BINDGEN_EXTRA_CLANG_ARGS_aarch64_unknown_linux_gnu: "--target=aarch64-linux-gnu --sysroot=${{ env.SYSROOT_PATH }}"
+        run: cargo clippy --workspace --target aarch64-unknown-linux-gnu -- -D warnings
+      - name: Build examples
+        env:
+          PKG_CONFIG_SYSROOT_DIR: ${{ env.SYSROOT_PATH }}
+          PKG_CONFIG_LIBDIR: ${{ env.SYSROOT_PATH }}/usr/lib/aarch64-linux-gnu/pkgconfig:${{ env.SYSROOT_PATH }}/usr/share/pkgconfig
+          BINDGEN_EXTRA_CLANG_ARGS_aarch64_unknown_linux_gnu: "--target=aarch64-linux-gnu --sysroot=${{ env.SYSROOT_PATH }}"
+        run: |
+          cargo build -p v4l2_m2m_check --target aarch64-unknown-linux-gnu --release
+          cargo build -p v4l2_m2m_encode --target aarch64-unknown-linux-gnu --release
+          cargo build -p v4l2_m2m_libcamera_encode --target aarch64-unknown-linux-gnu --release
+      - name: Upload artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: v4l2-examples-aarch64
+          path: |
+            target/aarch64-unknown-linux-gnu/release/v4l2_m2m_check
+            target/aarch64-unknown-linux-gnu/release/v4l2_m2m_encode
+            target/aarch64-unknown-linux-gnu/release/v4l2_m2m_libcamera_encode
+          if-no-files-found: error
+  verify:
+    name: Verify (Raspberry Pi)
+    needs: build
+    runs-on:
+      group: Self
+      labels: [self-hosted, linux, ARM64, Raspberry-Pi]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: v4l2-examples-aarch64
+      - name: Reset bcm2835-codec module
+        run: |
+          sudo modprobe -r bcm2835_codec 2>/dev/null || true
+          sudo modprobe bcm2835_codec
+          # VPU (VideoCore) 側の MMAL/VCHI 再初期化を待つ
+          sleep 3
+      - name: Run check
+        run: |
+          chmod +x v4l2_m2m_check
+          ./v4l2_m2m_check
+      - name: Reset bcm2835-codec module (check 後のリセット)
+        run: |
+          sudo modprobe -r bcm2835_codec
+          sudo modprobe bcm2835_codec
+          sleep 3
+      - name: Diagnose bcm2835-codec
+        run: |
+          echo "=== v4l2-ctl version ==="
+          v4l2-ctl --version
+          echo "=== current OUTPUT format ==="
+          v4l2-ctl -d /dev/video11 --get-fmt-video-out-mplane 2>&1 || \
+            v4l2-ctl -d /dev/video11 --get-fmt-video-out 2>&1 || true
+          echo "=== current CAPTURE format ==="
+          v4l2-ctl -d /dev/video11 --get-fmt-video-mplane 2>&1 || \
+            v4l2-ctl -d /dev/video11 --get-fmt-video 2>&1 || true
+      - name: Run encode (bcm2835-codec 単体動作確認)
+        run: |
+          chmod +x v4l2_m2m_encode
+          ./v4l2_m2m_encode --frames 30 --output /tmp/encode_test.mp4 || (echo "=== dmesg ===" && dmesg | tail -30 && exit 1)
+      - name: Run libcamera_encode
+        run: |
+          chmod +x v4l2_m2m_libcamera_encode
+          ./v4l2_m2m_libcamera_encode --duration 3 --output /tmp/test.mp4 || (echo "=== dmesg ===" && dmesg | tail -30 && exit 1)
