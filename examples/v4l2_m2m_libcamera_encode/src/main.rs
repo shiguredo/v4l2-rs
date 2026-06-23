@@ -515,6 +515,7 @@ fn main() -> Result<()> {
                     keyframe: encoded.is_keyframe,
                     timescale,
                     duration: 1,
+                    composition_time_offset: None,
                     data_offset,
                     data_size: avcc_data.len(),
                 };
