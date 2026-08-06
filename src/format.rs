@@ -66,9 +66,14 @@ impl Resolution {
     /// Y plane: stride * height
     /// U plane: (stride/2) * (height/2)
     /// V plane: (stride/2) * (height/2)
+    ///
+    /// 公開 API のため、任意の width / height / stride が渡されても
+    /// パニックしないよう飽和演算で計算する。
+    /// 実際の映像サイズで飽和することはないが、破損した値が渡された場合は
+    /// 上限値に丸められ、後段の ioctl がエラーとして拒否する。
     pub fn yuv420_size(&self) -> usize {
         let w = self.stride as usize;
         let h = self.height as usize;
-        w * h * 3 / 2
+        w.saturating_mul(h).saturating_mul(3) / 2
     }
 }

@@ -13,6 +13,8 @@
 
 - [CHANGE] MSRV (rust-version) を 1.93 に上げる
   - @voluntas
+- [FIX] 極端に大きな解像度で `yuv420_size()` が算術オーバーフローでパニックする問題を修正する
+  - @voluntas
 
 ### misc
 
