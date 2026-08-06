@@ -95,7 +95,9 @@ impl BufferSet {
         sys::ioctl_reqbufs(fd, &mut req)?;
 
         let actual_count = req.count;
-        let mut buffers = Vec::with_capacity(actual_count as usize);
+        // REQBUFS の返却値に基づく事前割り当てはしない。
+        // 実際のバッファ数は 4 〜 12 程度で、with_capacity との性能差は無視できる。
+        let mut buffers = Vec::new();
 
         for i in 0..actual_count {
             let mut plane = sys::v4l2_plane {

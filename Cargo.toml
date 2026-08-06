@@ -19,4 +19,5 @@ members = [
 ]
 
 [dependencies]
+# V4L2 ioctl / mmap などのシステムコールを呼び出すために利用する
 libc = "0.2"

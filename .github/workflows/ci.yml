@@ -60,7 +60,7 @@ jobs:
           PKG_CONFIG_SYSROOT_DIR: ${{ env.SYSROOT_PATH }}
           PKG_CONFIG_LIBDIR: ${{ env.SYSROOT_PATH }}/usr/lib/aarch64-linux-gnu/pkgconfig:${{ env.SYSROOT_PATH }}/usr/share/pkgconfig
           BINDGEN_EXTRA_CLANG_ARGS_aarch64_unknown_linux_gnu: "--target=aarch64-linux-gnu --sysroot=${{ env.SYSROOT_PATH }}"
-        run: cargo clippy --workspace --target aarch64-unknown-linux-gnu -- -D warnings
+        run: cargo clippy --workspace --all-targets --target aarch64-unknown-linux-gnu -- -D warnings
       - name: Build examples
         env:
           PKG_CONFIG_SYSROOT_DIR: ${{ env.SYSROOT_PATH }}

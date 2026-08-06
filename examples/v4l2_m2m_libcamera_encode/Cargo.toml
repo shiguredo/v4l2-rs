@@ -2,11 +2,16 @@
 name = "v4l2_m2m_libcamera_encode"
 version = "0.0.0"
 edition = "2024"
+rust-version = "1.93"
 publish = false
 
 [dependencies]
+# libcamera のバッファ FD を V4L2 へ渡す際の RawFd 関連で利用する
 libc = "0.2"
+# CLI 引数のパースに利用する
 noargs = "0.4"
+# libcamera カメラのキャプチャに利用する
 shiguredo_libcamera = "2026.1.0"
+# MP4 ファイルの書き出しに利用する
 shiguredo_mp4 = "2026.3.0"
 shiguredo_v4l2 = { path = "../.." }

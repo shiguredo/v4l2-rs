@@ -19,7 +19,8 @@ impl OutputQueue {
     /// OUTPUT キューを作成する。
     pub fn new(fd: RawFd, buf_type: u32, memory: u32, buffers: BufferSet) -> Self {
         let count = buffers.count();
-        let mut available = VecDeque::with_capacity(count as usize);
+        // バッファ数は 4 〜 12 程度で、with_capacity との性能差は無視できる
+        let mut available = VecDeque::new();
         for i in 0..count {
             available.push_back(i);
         }

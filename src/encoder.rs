@@ -333,11 +333,15 @@ struct EncoderRuntime<T> {
 }
 
 struct EncoderShared<T> {
+    // encode() (メインスレッド) と poller スレッドの両方からアクセスするため Mutex で保護する。
+    // ロック区間は ioctl 呼び出しを含まない短い処理で await が不要なため、mpsc チャネルより簡潔に済む。
     runtime: Mutex<EncoderRuntime<T>>,
     capture_queue: Arc<CaptureQueue>,
     resolution: Resolution,
     input_memory: Memory,
     output_memory: u32,
+    // Drop 後の再キュー失敗 (RequeueToken::requeue) を poller スレッドへ伝えるための共有バッファ。
+    // 排他アクセスは RequeueToken 側の短いロックで完結するため Mutex で十分である。
     pending_async_errors: Arc<Mutex<VecDeque<crate::error::Error>>>,
 }
 

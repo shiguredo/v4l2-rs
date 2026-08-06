@@ -1,5 +1,7 @@
 target/
 .cargo/
+fuzz/corpus/
+fuzz/artifacts/
 
 # Agents
 .claude/
