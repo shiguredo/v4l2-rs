@@ -48,7 +48,7 @@ bcm2835-codec を利用した H.264 ハードウェアエンコード/デコー�
 |----|------|----------|
 | `Memory` | バッファのメモリ方式 | `Mmap` (カーネル mmap によるコピー入出力), `DmaBuf` (DMABUF によるゼロコピー入出力) |
 | `PixelFormat` | ピクセルフォーマット | `Yuv420` (I420), `Nv12`, `H264`, `to_fourcc()`, `from_fourcc()` |
-| `Resolution` | 映像解像度 (フィールド: `width`, `height`, `stride`) | `yuv420_size()` (stride × height × 3/2 のバイト数を算出) |
+| `Resolution` | 映像解像度 (フィールド: `width`, `height`, `stride`) | `yuv420_size()` (Y plane と chroma plane 2 面の合計バイト数を算出) |
 | `Error` | V4L2 操作で発生するエラー | `DeviceOpen` / `Ioctl` / `Mmap` / `Poll` / `InvalidFormat` / `NoAvailableBuffer` / `NotStarted` / `StreamOn` / `StreamOff` / `InputTooLarge` / `MmapInputNotProduced` / `PollerAborted` |
 | `Result<T>` | `std::result::Result<T, Error>` のエイリアス | — |
 
