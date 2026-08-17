@@ -64,16 +64,25 @@ impl Resolution {
     /// YUV420 (I420) フレームのバイトサイズを計算する。
     ///
     /// Y plane: stride * height
-    /// U plane: (stride/2) * (height/2)
-    /// V plane: (stride/2) * (height/2)
+    /// U plane: chroma_stride * chroma_height
+    /// V plane: chroma_stride * chroma_height
+    ///
+    /// chroma は 4:2:0 でサブサンプルされるため、chroma_stride / chroma_height は
+    /// それぞれ stride / height を 2 で切り上げた値になる。
+    /// これにより奇数 stride / height でも平面分割 (split_at_mut) に必要な
+    /// バイト数と一致し、バッファ長検査の抜けからくるパニックを防ぐ。
     ///
     /// 公開 API のため、任意の width / height / stride が渡されても
     /// パニックしないよう飽和演算で計算する。
     /// 実際の映像サイズで飽和することはないが、破損した値が渡された場合は
     /// 上限値に丸められ、後段の ioctl がエラーとして拒否する。
     pub fn yuv420_size(&self) -> usize {
-        let w = self.stride as usize;
-        let h = self.height as usize;
-        w.saturating_mul(h).saturating_mul(3) / 2
+        let stride = self.stride as usize;
+        let height = self.height as usize;
+        let chroma_stride = self.stride.div_ceil(2) as usize;
+        let chroma_height = self.height.div_ceil(2) as usize;
+        let y_size = stride.saturating_mul(height);
+        let uv_size = chroma_stride.saturating_mul(chroma_height);
+        y_size.saturating_add(uv_size.saturating_mul(2))
     }
 }

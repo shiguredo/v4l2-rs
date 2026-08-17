@@ -57,23 +57,25 @@ proptest! {
         prop_assert_eq!(restored, Some(level));
     }
 
-    /// Resolution の yuv420_size は stride * height * 3 / 2 に等しい。
+    /// Resolution の yuv420_size は Y plane と chroma plane 2 面の合計バイト数に等しい。
+    /// chroma plane は 4:2:0 サブサンプリングのため、stride / height を 2 で切り上げて計算する。
+    /// 奇数 stride / height でも平面分割 (split_at_mut) とサイズが一致することを検証する。
     #[test]
-    fn yuv420_size_uses_stride(
-        width in 2u32..4096,
-        height in 2u32..4096,
+    fn yuv420_size_matches_plane_split(
+        width in 1u32..4096,
+        height in 1u32..4096,
         extra in 0u32..256,
     ) {
-        let width = width & !1;
-        let height = height & !1;
-        let stride = width + (extra & !1);
+        let stride = width + extra;
         let res = Resolution {
             width,
             height,
             stride,
         };
+        let chroma_stride = stride.div_ceil(2);
+        let chroma_height = height.div_ceil(2);
         let expected = (stride as usize) * (height as usize)
-            + (stride as usize / 2) * (height as usize / 2) * 2;
+            + (chroma_stride as usize) * (chroma_height as usize) * 2;
         prop_assert_eq!(res.yuv420_size(), expected);
     }
 }
