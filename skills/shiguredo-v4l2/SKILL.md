@@ -49,6 +49,7 @@ bcm2835-codec を利用した H.264 ハードウェアエンコード/デコー�
 | `Memory` | バッファのメモリ方式 | `Mmap` (カーネル mmap によるコピー入出力), `DmaBuf` (DMABUF によるゼロコピー入出力) |
 | `PixelFormat` | ピクセルフォーマット | `Yuv420` (I420), `Nv12`, `H264`, `to_fourcc()`, `from_fourcc()` |
 | `Resolution` | 映像解像度 (フィールド: `width`, `height`, `stride`) | `yuv420_size()` (Y plane と chroma plane 2 面の合計バイト数を算出) |
+| `Crop` | 入力映像の crop 領域 (フィールド: `x`, `y`, `width`, `height`) | `ConverterConfig` の `crop` で指定する |
 | `Error` | V4L2 操作で発生するエラー | `DeviceOpen` / `Ioctl` / `Mmap` / `Poll` / `InvalidFormat` / `NoAvailableBuffer` / `NotStarted` / `StreamOn` / `StreamOff` / `InputTooLarge` / `MmapInputNotProduced` / `PollerAborted` |
 | `Result<T>` | `std::result::Result<T, Error>` のエイリアス | — |
 
@@ -144,10 +145,18 @@ V4L2 用語の OUTPUT は「カーネルへの入力 (YUV)」、CAPTURE は「�
 | `output_width` / `output_height` | `u32` | (`new` 引数) |
 | `output_memory` | `Memory` | `Mmap` |
 | `output_pixel_format` | `PixelFormat` | `Nv12` |
+| `crop` | `Option<Crop>` | `None` (フルフレーム) |
 | `buffer_count` | `u32` | `4` |
 
 変換器は `PixelFormat::Yuv420` / `PixelFormat::Nv12` のみ対応 (双方の相互変換と拡大縮小)。`PixelFormat::H264` を指定すると `Error::InvalidFormat`。
 `S_FMT` 後にカーネルが確定した解像度は `input_resolution()` / `output_resolution()` で取得できる (要求値と異なる場合がある)。
+
+#### 入力 crop (`ConverterConfig` の `crop`)
+
+- `ConverterConfig::crop: Option<Crop>` で入力映像の一部分を切り出し、出力解像度へ拡大縮小できる。座標・サイズは `input_resolution()` 基準。Mmap / DMABUF どちらの入力でも有効。
+- `crop: None` はフルフレーム (crop なし) を意味し、`S_SELECTION` を発行しない (デバイスの初期 crop 矩形は入力解像度全体)。
+- `crop: Some(...)` は `ImageConverter::new()` 内で `S_FMT` 後に `S_SELECTION` を発行して適用し、`G_SELECTION` で反映結果を検証する。指定した矩形が反映されない場合は `Error::CropNotApplied` を返して初期化が失敗する。
+- ハードウェア制約として、Raspberry Pi の bcm2835-codec ISP は (0,0) 起点のみ対応するため、オフセット付き crop (`x` / `y` > 0) は `G_SELECTION` 検証で `Error::CropNotApplied` になる。
 
 ## 入力種別: MMAP / DMABUF
 
@@ -407,6 +416,7 @@ impl EncodeHandler for MyHandler {
 | `InputTooLarge { size, capacity }` | 入力サイズがバッファ容量超過 |
 | `MmapInputNotProduced` | `Mmap` 入力クロージャが `None` を返した |
 | `PollerAborted` | Mutex の `PoisonError` 等で Poller が中断された |
+| `CropNotApplied { requested, actual }` | 指定した crop 領域がデバイスに反映されなかった (`G_SELECTION` 検証で不一致) |
 
 `Error` は `Display` / `std::error::Error` を実装し、`source()` で原因の `io::Error` を辿れる。
 
@@ -419,4 +429,5 @@ impl EncodeHandler for MyHandler {
 - **画像変換器のフォーマット**: 入力/出力ともに `Yuv420` / `Nv12` のみ。`H264` を指定すると `Error::InvalidFormat`。
 - **コントロール失敗の許容**: `EncoderConfig` の各 V4L2 コントロール (Profile / Level / I-Period / Repeat SPS/PPS / Bitrate) はデバイスによって未対応の場合があり、初期化時の `S_CTRL` 失敗は無視する (非致命的)。
 - **CAPTURE バッファサイズ**: H.264 出力の CAPTURE バッファは固定で 512KB の `sizeimage` を要求する。極端に大きなフレームでは `Error::InputTooLarge` の可能性がある。
+- **入力 crop のハードウェア制約**: Raspberry Pi の bcm2835-codec ISP (`/dev/video12`) は `V4L2_SEL_TGT_CROP` を (0,0) 起点のみでサポートし、`left` / `top` を強制的に 0 にする。このためオフセット付き crop (`x` / `y` > 0) は `G_SELECTION` 検証で `Error::CropNotApplied` になり、`ImageConverter::new()` が失敗する。crop は `STREAMON` 前 (new() 時) にのみ適用できる。
 - **タイムスタンプ精度**: `timestamp_us` は `struct timeval` (`tv_sec * 1_000_000 + tv_usec`) で扱うため、マイクロ秒精度。

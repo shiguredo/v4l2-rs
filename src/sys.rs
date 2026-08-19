@@ -56,6 +56,8 @@ pub(crate) const VIDIOC_S_CTRL: u64 = _iowr(V4L2_TYPE, 28, V4L2_CONTROL_SIZE);
 pub(crate) const VIDIOC_EXPBUF: u64 = _iowr(V4L2_TYPE, 16, V4L2_EXPORTBUFFER_SIZE);
 pub(crate) const VIDIOC_SUBSCRIBE_EVENT: u64 = _iow(V4L2_TYPE, 90, V4L2_EVENT_SUBSCRIPTION_SIZE);
 pub(crate) const VIDIOC_DQEVENT: u64 = _ior(V4L2_TYPE, 89, V4L2_EVENT_SIZE);
+pub(crate) const VIDIOC_G_SELECTION: u64 = _iowr(V4L2_TYPE, 94, V4L2_SELECTION_SIZE);
+pub(crate) const VIDIOC_S_SELECTION: u64 = _iowr(V4L2_TYPE, 95, V4L2_SELECTION_SIZE);
 
 // ---------------------------------------------------------------------------
 // バッファタイプ
@@ -145,6 +147,12 @@ pub(crate) const V4L2_EVENT_SOURCE_CHANGE: u32 = 5;
 pub(crate) const V4L2_EVENT_SRC_CH_RESOLUTION: u32 = 1;
 
 // ---------------------------------------------------------------------------
+// 選択ターゲット
+// ---------------------------------------------------------------------------
+
+pub(crate) const V4L2_SEL_TGT_CROP: u32 = 0x0000;
+
+// ---------------------------------------------------------------------------
 // 構造体サイズ定数 (ioctl マクロ用)
 // ---------------------------------------------------------------------------
 
@@ -155,6 +163,7 @@ const V4L2_CONTROL_SIZE: u32 = 8;
 const V4L2_EXPORTBUFFER_SIZE: u32 = 64;
 const V4L2_EVENT_SUBSCRIPTION_SIZE: u32 = 32;
 const V4L2_EVENT_SIZE: u32 = 136;
+const V4L2_SELECTION_SIZE: u32 = 64;
 
 // ---------------------------------------------------------------------------
 // V4L2 構造体 (#[repr(C)])
@@ -334,6 +343,27 @@ pub(crate) struct v4l2_event {
     pub reserved: [u32; 8],
 }
 
+/// `v4l2_rect` (選択領域の矩形)。
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct v4l2_rect {
+    pub left: i32,
+    pub top: i32,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// `v4l2_selection`。
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct v4l2_selection {
+    pub r#type: u32,
+    pub target: u32,
+    pub flags: u32,
+    pub r: v4l2_rect,
+    pub reserved: [u32; 9],
+}
+
 // ---------------------------------------------------------------------------
 // ioctl ラッパー関数
 // ---------------------------------------------------------------------------
@@ -471,6 +501,28 @@ pub(crate) fn ioctl_dqevent(fd: RawFd, event: &mut v4l2_event) -> crate::error::
     Ok(())
 }
 
+pub(crate) fn ioctl_s_selection(fd: RawFd, sel: &mut v4l2_selection) -> crate::error::Result<()> {
+    let ret = unsafe { libc::ioctl(fd, VIDIOC_S_SELECTION, sel as *mut _) };
+    if ret < 0 {
+        return Err(crate::error::Error::Ioctl {
+            request: "VIDIOC_S_SELECTION",
+            source: std::io::Error::last_os_error(),
+        });
+    }
+    Ok(())
+}
+
+pub(crate) fn ioctl_g_selection(fd: RawFd, sel: &mut v4l2_selection) -> crate::error::Result<()> {
+    let ret = unsafe { libc::ioctl(fd, VIDIOC_G_SELECTION, sel as *mut _) };
+    if ret < 0 {
+        return Err(crate::error::Error::Ioctl {
+            request: "VIDIOC_G_SELECTION",
+            source: std::io::Error::last_os_error(),
+        });
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // mmap / munmap ラッパー
 // ---------------------------------------------------------------------------
@@ -510,6 +562,17 @@ pub(crate) fn zeroed_format(buf_type: u32) -> v4l2_format {
         r#type: buf_type,
         _pad: 0,
         fmt: v4l2_format_union { raw: [0u8; 200] },
+    }
+}
+
+/// `v4l2_selection` をゼロ初期化する。
+pub(crate) fn zeroed_selection(buf_type: u32) -> v4l2_selection {
+    v4l2_selection {
+        r#type: buf_type,
+        target: 0,
+        flags: 0,
+        r: v4l2_rect::default(),
+        reserved: [0; 9],
     }
 }
 

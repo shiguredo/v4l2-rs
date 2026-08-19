@@ -1,5 +1,16 @@
 use proptest::prelude::*;
-use shiguredo_v4l2::v4l2_m2m::Error;
+use shiguredo_v4l2::v4l2_m2m::{Crop, Error};
+
+fn arb_crop() -> impl Strategy<Value = Crop> {
+    (any::<u32>(), any::<u32>(), any::<u32>(), any::<u32>()).prop_map(|(x, y, width, height)| {
+        Crop {
+            x,
+            y,
+            width,
+            height,
+        }
+    })
+}
 
 fn arb_error() -> impl Strategy<Value = Error> {
     prop_oneof![
@@ -30,6 +41,8 @@ fn arb_error() -> impl Strategy<Value = Error> {
             .prop_map(|(size, capacity)| Error::InputTooLarge { size, capacity }),
         any::<String>().prop_map(|_| Error::MmapInputNotProduced),
         any::<String>().prop_map(|_| Error::PollerAborted),
+        (arb_crop(), arb_crop())
+            .prop_map(|(requested, actual)| Error::CropNotApplied { requested, actual }),
     ]
 }
 

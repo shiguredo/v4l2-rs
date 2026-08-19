@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::buffer::BufferSet;
 use crate::device::Device;
-use crate::format::{Memory, PixelFormat, Resolution};
+use crate::format::{Crop, Memory, PixelFormat, Resolution};
 use crate::poller::{PollEvent, Poller, PollerConfig, Timestamp};
 use crate::queue::{CaptureQueue, OutputQueue};
 use crate::sys;
@@ -34,6 +34,11 @@ pub struct ConverterConfig {
     pub output_memory: Memory,
     /// 出力ピクセルフォーマット。
     pub output_pixel_format: PixelFormat,
+    /// 入力映像の crop 領域。`None` はフルフレーム (crop なし)。
+    ///
+    /// 座標とサイズは `input_resolution()` で確定する入力解像度を基準とする。
+    /// Mmap / DMABUF どちらの入力でも有効で、crop 領域が出力解像度へ拡大縮小される。
+    pub crop: Option<Crop>,
     /// OUTPUT/CAPTURE バッファ数。
     pub buffer_count: u32,
 }
@@ -51,6 +56,7 @@ impl ConverterConfig {
             output_height,
             output_memory: Memory::Mmap,
             output_pixel_format: PixelFormat::Nv12,
+            crop: None,
             buffer_count: 4,
         }
     }
@@ -248,6 +254,11 @@ impl<T: Send + 'static> ImageConverter<T> {
             config.output_pixel_format,
             "output resolution",
         )?;
+
+        // crop は STREAMON 前に適用する必要があるため、S_FMT 確定後にここで 1 回だけ発行する。
+        if let Some(crop) = config.crop {
+            Self::apply_crop(fd, crop)?;
+        }
 
         let output_v4l2_memory = config.input_memory.to_v4l2();
         let output_buffers = BufferSet::allocate(
@@ -587,6 +598,50 @@ impl<T: Send + 'static> ImageConverter<T> {
             height: actual.height,
             stride: actual.plane_fmt[0].bytesperline,
         })
+    }
+
+    /// OUTPUT 側の selection (`V4L2_SEL_TGT_CROP`) に crop 領域を適用する。
+    ///
+    /// `S_SELECTION` 後に `G_SELECTION` で反映結果を確認し、指定した矩形と一致しない場合は
+    /// `Error::CropNotApplied` を返す。ドライバが crop を静かに無視・変更する環境
+    /// (bcm2835-codec ISP の (0,0) 起点固定や幅クランプ等) でも、歪んだ出力を流さずに検知する。
+    fn apply_crop(fd: RawFd, crop: Crop) -> crate::error::Result<()> {
+        let requested = sys::v4l2_rect {
+            left: crop.x as i32,
+            top: crop.y as i32,
+            width: crop.width,
+            height: crop.height,
+        };
+
+        let mut sel = sys::zeroed_selection(sys::V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE);
+        sel.target = sys::V4L2_SEL_TGT_CROP;
+        sel.r = requested;
+        sys::ioctl_s_selection(fd, &mut sel)?;
+
+        let mut verify = sys::zeroed_selection(sys::V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE);
+        verify.target = sys::V4L2_SEL_TGT_CROP;
+        sys::ioctl_g_selection(fd, &mut verify)?;
+
+        let actual = Crop {
+            x: verify.r.left as u32,
+            y: verify.r.top as u32,
+            width: verify.r.width,
+            height: verify.r.height,
+        };
+        let expected = Crop {
+            x: requested.left as u32,
+            y: requested.top as u32,
+            width: requested.width,
+            height: requested.height,
+        };
+        if actual != expected {
+            return Err(crate::error::Error::CropNotApplied {
+                requested: expected,
+                actual,
+            });
+        }
+
+        Ok(())
     }
 
     fn frame_size(width: u32, height: u32) -> usize {

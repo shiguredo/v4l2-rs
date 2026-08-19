@@ -11,6 +11,8 @@
 
 ## develop
 
+- [CHANGE] ImageConverter に入力 crop 機能を追加する
+  - @melpon
 - [CHANGE] MSRV (rust-version) を 1.93 に上げる
   - @voluntas
 - [FIX] 極端に大きな解像度で `yuv420_size()` が算術オーバーフローでパニックする問題を修正する

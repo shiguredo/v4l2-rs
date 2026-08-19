@@ -32,6 +32,13 @@ pub enum Error {
     MmapInputNotProduced,
     /// ポーリングスレッドが中断された。
     PollerAborted,
+    /// 指定した crop 領域がデバイスに反映されなかった。
+    CropNotApplied {
+        /// 要求した crop 領域。
+        requested: crate::format::Crop,
+        /// `G_SELECTION` が返した実際の crop 領域。
+        actual: crate::format::Crop,
+    },
 }
 
 impl std::fmt::Display for Error {
@@ -70,6 +77,10 @@ impl std::fmt::Display for Error {
                 f.write_str("mmap 入力クロージャが入力データを生成しませんでした")
             }
             Error::PollerAborted => f.write_str("ポーリングスレッドが中断されました"),
+            Error::CropNotApplied { requested, actual } => write!(
+                f,
+                "指定した crop 領域がデバイスに反映されませんでした: 要求 {requested:?}, 実際 {actual:?}"
+            ),
         }
     }
 }

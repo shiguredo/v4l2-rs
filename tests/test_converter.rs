@@ -4,8 +4,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use shiguredo_v4l2::v4l2_m2m::{
-    ConvertCallbackOutput, ConvertInput, ConvertedFrame, ConverterConfig, DecodeInput,
-    DecodedFrame, DecoderConfig, EncodeInput, EncodedFrame, EncoderConfig, FnDecodeHandler,
+    ConvertCallbackOutput, ConvertInput, ConvertedFrame, ConverterConfig, Crop, DecodeInput,
+    DecodedFrame, DecoderConfig, EncodeInput, EncodedFrame, EncoderConfig, Error, FnDecodeHandler,
     FnEncodeHandler, H264Decoder, H264Encoder, ImageConverter, Memory, PixelFormat, Resolution,
 };
 
@@ -195,6 +195,104 @@ fn run_pipeline_test(case: TestCase) {
             mae <= MAE_THRESHOLD,
             "frame={value} の Y 面 MAE が閾値超過です: mae={mae:.3}, threshold={MAE_THRESHOLD:.3}"
         );
+    }
+}
+
+// 入力 crop 機能のテスト。
+//
+// `ConverterConfig::crop` を指定した変換器で入力映像の一部が出力解像度へ拡大縮小されることを
+// 検証する。実機の V4L2 M2M デバイス (/dev/video12) が必要なため、デバイスが無い環境では失敗する。
+#[test]
+fn test_converter_crop() {
+    const CROP_WIDTH: u32 = 960;
+    const CROP_HEIGHT: u32 = 540;
+
+    // crop: None (フルフレーム) の変換器で基準出力を取得する。
+    let mut full = make_crop_target(None).expect("crop: None の変換器の初期化に失敗しました");
+    let full_out = convert_frame(&mut full, 1);
+
+    // crop (0,0,960,540) を ConverterConfig で指定した変換器で出力を取得する。
+    // crop は new() 内で STREAMON 前に S_SELECTION により適用される。
+    let mut cropped = make_crop_target(Some(Crop {
+        x: 0,
+        y: 0,
+        width: CROP_WIDTH,
+        height: CROP_HEIGHT,
+    }))
+    .expect("crop 付き変換器の初期化に失敗しました");
+    let crop_out = convert_frame(&mut cropped, 1);
+
+    // crop が反映され、フルフレーム出力と内容が異なることを確認する。
+    assert_ne!(
+        full_out, crop_out,
+        "crop が出力に反映されていません (フルフレームと同一出力です)"
+    );
+
+    // オフセット付き crop は bcm2835-codec が (0,0) 起点のみサポートするため反映されない。
+    // G_SELECTION 検証により new() がエラーを返すことを確認する。
+    let err = match make_crop_target(Some(Crop {
+        x: 100,
+        y: 100,
+        width: CROP_WIDTH,
+        height: CROP_HEIGHT,
+    })) {
+        Ok(_) => panic!("オフセット付き crop で new() が成功しました"),
+        Err(err) => err,
+    };
+    assert!(
+        matches!(err, Error::CropNotApplied { .. }),
+        "オフセット付き crop が CropNotApplied で検知されませんでした: {err:?}"
+    );
+}
+
+// crop 検証用の変換器。MMAP 入力 (I420) -> MMAP 出力 (NV12) で、出力解像度へ拡大縮小する。
+// `crop` は ConverterConfig::crop に設定される。
+struct CropTarget {
+    converter: ImageConverter<i64>,
+    rx: mpsc::Receiver<Result<(i64, Vec<u8>), String>>,
+}
+
+fn make_crop_target(crop: Option<Crop>) -> Result<CropTarget, Error> {
+    let (tx, rx) = mpsc::channel::<Result<(i64, Vec<u8>), String>>();
+    let mut config = ConverterConfig::new(SOURCE_WIDTH, SOURCE_HEIGHT, MIDDLE_WIDTH, MIDDLE_HEIGHT);
+    config.input_pixel_format = PixelFormat::Yuv420;
+    config.output_pixel_format = PixelFormat::Nv12;
+    config.input_memory = Memory::Mmap;
+    config.output_memory = Memory::Mmap;
+    config.buffer_count = BUFFER_COUNT;
+    config.crop = crop;
+    let converter = ImageConverter::<i64>::new(config, move |result| {
+        let msg = match result {
+            Ok(ConvertCallbackOutput::Frame { frame, value }) => match frame.data() {
+                Some(data) => Ok((value, data.to_vec())),
+                None => Err("変換器が MMAP 出力を返しませんでした".to_string()),
+            },
+            Err(err) => Err(err.to_string()),
+        };
+        let _ = tx.send(msg);
+    })?;
+    Ok(CropTarget { converter, rx })
+}
+
+// テスト用の I420 フレームを変換器へ投入し、出力を取得する。
+fn convert_frame(target: &mut CropTarget, seed: u32) -> Vec<u8> {
+    let frame = generate_i420_frame(SOURCE_WIDTH, SOURCE_HEIGHT, seed);
+    let frame_len = frame.len();
+    target
+        .converter
+        .convert(
+            ConvertInput::Mmap(&mut |buf, _res, _v| {
+                buf[..frame_len].copy_from_slice(&frame);
+                Some(frame_len)
+            }),
+            seed as i64,
+            0,
+        )
+        .expect("変換に失敗しました");
+    match target.rx.recv_timeout(FLUSH_TIMEOUT) {
+        Ok(Ok((_, data))) => data,
+        Ok(Err(err)) => panic!("変換のコールバックでエラーが発生しました: {err}"),
+        Err(_) => panic!("変換の出力がタイムアウトしました"),
     }
 }
 

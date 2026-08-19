@@ -60,6 +60,23 @@ pub struct Resolution {
     pub stride: u32,
 }
 
+/// 入力映像の crop 領域。
+///
+/// 座標とサイズは OUTPUT 側の `S_FMT` で確定した入力解像度
+/// (`ImageConverter::input_resolution()`) を基準とする。
+/// `x` / `y` は `v4l2_rect` の `left` / `top` に対応する。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Crop {
+    /// crop 領域の左端 x 座標。
+    pub x: u32,
+    /// crop 領域の上端 y 座標。
+    pub y: u32,
+    /// crop 領域の幅。
+    pub width: u32,
+    /// crop 領域の高さ。
+    pub height: u32,
+}
+
 impl Resolution {
     /// YUV420 (I420) フレームのバイトサイズを計算する。
     ///

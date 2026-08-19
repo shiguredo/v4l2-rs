@@ -29,5 +29,5 @@ pub mod v4l2_m2m {
         H264Level, H264Profile,
     };
     pub use crate::error::{Error, Result};
-    pub use crate::format::{Memory, PixelFormat, Resolution};
+    pub use crate::format::{Crop, Memory, PixelFormat, Resolution};
 }
