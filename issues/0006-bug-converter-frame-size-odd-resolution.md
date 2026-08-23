@@ -3,7 +3,7 @@
 - Created: 2026-08-21
 - Completed:
 - Branch: feature/fix-converter-frame-size-odd-resolution
-- Polished:
+- Polished: 2026-08-23
 
 ## 目的
 
@@ -20,9 +20,9 @@
 
 ## 設計方針
 
-- `ImageConverter::frame_size` を削除し、呼び出し箇所を `Resolution { width, height, stride: width }.yuv420_size() as u32` に置き換える
+- `ImageConverter::frame_size` を削除し、呼び出し箇所を `Resolution { width, height, stride: width }.yuv420_size()` を `u32::try_from` で変換する形に置き換える
 - NV12 も 4:2:0 で plane 合計サイズは I420 と同じため、この置き換えで両フォーマット対応可能
-- `sizeimage` が `u32` に収まらない場合の対応も `Resolution::yuv420_size` の `usize` 戻り値と `u32::try_from` で明示エラー化するかは実装時判断
+- `sizeimage` が `u32` に収まらない場合（`u32::MAX` 級の入力）は `u32::try_from` の失敗で `Error::InvalidFormat` を返す。`as u32` による切り詰めは完了条件「panic せず適切にエラーを返す」を満たさないため使用しない
 - `Resolution::yuv420_size` に対する既存の PBT (`pbt/tests/prop_format.rs::yuv420_size_matches_plane_split`) が引き続き適用される
 
 ## 完了条件
