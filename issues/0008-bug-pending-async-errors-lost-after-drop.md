@@ -3,7 +3,7 @@
 - Created: 2026-08-21
 - Completed:
 - Branch: feature/fix-pending-async-errors-lost-after-drop
-- Polished:
+- Polished: 2026-08-23
 
 ## 目的
 
@@ -18,22 +18,24 @@
 
 ## 設計方針
 
-- Drop 側で `drain_pending_async_errors` を最後にもう一度呼び、残っているエラーを何らかの経路（`eprintln!` 相当のログ、あるいは Drop 前に呼び出せる強制フラッシュ API）で外に出す
-- 依存追加を避けるため `eprintln!` で標準エラー出力に吐く方向で検討する（`src/lib.rs` に log crate 依存を持ち込む判断は別途 issue にする）
-- あるいは `H264Encoder::flush_errors(&mut H) -> Result<()>` のような明示 API を追加し、ユーザーが Drop 前に呼べる形にする
-- どちらの方針を採るかは advisor 相談で決める。デフォルトの安全性を重視するなら Drop での自動吐き出しが妥当
-- `issues/0003-bug-frame-outlives-codec-fd.md` の解決方針（fd 共有 / `!Send` 化 / 無効化フラグ）と協調させる必要がある
+コーデック Drop 後はハンドラーが存在しない（`start_poller` が `handler.take()` で消費し、poller 停止とともに破棄される）ため、Drop 後の `requeue` 失敗はハンドラーへ配送できない。よって `RequeueToken::requeue` の失敗時に直接ログ出力する。
+
+- `RequeueToken::requeue` は enqueue 失敗時に、既存どおり `pending_async_errors` へ push する（コーデック生存中は `handle_event` 冒頭でユーザーへ配信される既存経路）
+- これに加えて、enqueue 失敗時に `eprintln!` でログ出力する（メッセージは英語）。これにより、コーデック Drop 後に配信不能になってもエラーが silent に消失しない
+- `eprintln!` を選ぶのは依存追加を避けるため（`src/lib.rs` に log / tracing クレート依存を持ち込む判断は別途 issue にする。ログは shiguredo-rust 規約で tracing が指定されているが、本 issue では既存の依存を増やさない）
+- コーデック Drop 側（`H264Encoder::drop` 等）の変更は不要。Drop 時点で drain しても、その後に積まれるエラーは捕捉できないため
+- `flush_errors(&mut H)` のような明示 API は不採用。handler は `start_poller` の `handler.take()` で poller スレッドのクロージャに移動済みであり、ユーザーが `&mut H` を渡せないため
+- `issues/0003-bug-frame-outlives-codec-fd.md` は案 A（`CaptureQueue` / `OutputQueue` / `BufferSet` の fd を `Arc<OwnedFd>` に変更して共有）で確定済み（案 B の `!Send` 化、案 C の無効化フラグは不採用）。0003 適用後、コーデック Drop 後の `requeue` は open 済み fd への QBUF になり「成功するか EINVAL」を返す。成功時はエラーが発生せず、EINVAL 時のみ本 issue の対象（push + ログ出力）となる
 
 ## 完了条件
 
-- コーデック Drop 後にフレームが Drop されて `requeue` が失敗した場合でも、エラーが silent に消失しない
+- コーデック Drop 後にフレームが Drop されて `requeue` が失敗した場合でも、エラーが `eprintln!` により標準エラー出力に出力され、silent に消失しない
 - 通常運用でパフォーマンスへの影響が無視できる
 - `cargo test --workspace` および `cargo clippy --workspace --all-targets -- -D warnings` が成功する
 
 ## 変更対象
 
-- `src/encoder.rs`（`H264Encoder::drop`）
-- `src/decoder.rs`（`H264Decoder::drop`）
-- `src/converter.rs`（`ImageConverter::drop`）
-- 必要に応じて公開 API 追加
+- `src/encoder.rs`（`RequeueToken::requeue` へのログ出力追加）
+- `src/decoder.rs`（同上）
+- `src/converter.rs`（同上）
 - `CHANGES.md`（`[FIX]` として追加）
