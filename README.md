@@ -28,7 +28,7 @@ bcm2835-codec を利用した H.264 ハードウェアエンコード/デコー�
 - H.264 デコード (`/dev/video10`)
 - 画像変換 (`/dev/video12`) - スケーリングと I420 ⇔ NV12 相互変換
 - I420 (YUV420 planar) / NV12 (YUV420 semi-planar) 入力対応
-- DMABUF によるゼロコピー入力対応
+- DMABUF によるゼロコピー入出力対応 (入力は DMABUF の直接 import、出力は EXPBUF でエクスポートした DMABUF fd を取得可能)
 - 依存ライブラリは `libc` のみ
 
 ## 対応環境
@@ -87,6 +87,11 @@ println!("encoded: {bytes} bytes, keyframe: {keyframe}, ts={out_ts}, value={valu
 
 ### H.264 デコード
 
+デコーダーは動的解像度 (SOURCE_CHANGE) に対応しています。`H264Decoder::new` 時点では CAPTURE バッファは
+未確保のまま `VIDIOC_SUBSCRIBE_EVENT` (SOURCE_CHANGE) を購読し、解像度が確定したタイミングで
+`on_resolution_changed` が呼ばれます (購読に失敗したデバイスではイベント購読なしで動作するため、
+このコールバックは呼ばれません)。
+
 ```rust
 use std::sync::mpsc;
 use std::time::Duration;
@@ -143,9 +148,11 @@ if let Ok(message) = rx.recv_timeout(Duration::from_secs(1)) {
 }
 ```
 
-### DMABUF 入力
+### DMABUF 入出力
 
-libcamera 等からの DMABUF を直接エンコーダーに渡せます。
+libcamera 等からの DMABUF を直接エンコーダーに渡せます。入力側は `input_memory = Memory::DmaBuf` と設定し、
+`EncodeInput::DmaBuf` を渡します。出力側は `output_memory = Memory::DmaBuf` と設定すると、CAPTURE バッファが
+EXPBUF でエクスポートされ、`dmabuf_fd()` で DMABUF fd を取得できます (`data()` は `None`)。
 
 ```rust
 use shiguredo_v4l2::v4l2_m2m::{EncodeInput, EncoderConfig, FnEncodeHandler, H264Encoder, Memory};
@@ -170,7 +177,7 @@ encoder.encode(
 ### エンコーダー設定
 
 ```rust
-use shiguredo_v4l2::v4l2_m2m::{EncoderConfig, H264Profile, H264Level, PixelFormat};
+use shiguredo_v4l2::v4l2_m2m::{EncoderConfig, H264Profile, H264Level, Memory, PixelFormat};
 
 let mut config = EncoderConfig::new(1920, 1080, 4_000_000);
 config.profile = H264Profile::High;
@@ -180,6 +187,8 @@ config.i_period = 500;                     // I フレーム間隔
 config.repeat_sequence_header = true;      // 各キーフレームに SPS/PPS を付加する
 config.output_buffer_count = 4;            // OUTPUT バッファ数
 config.capture_buffer_count = 4;           // CAPTURE バッファ数
+config.input_memory = Memory::Mmap;        // または Memory::DmaBuf
+config.output_memory = Memory::Mmap;       // Memory::DmaBuf にすると DMABUF 出力
 ```
 
 ### 画像変換
