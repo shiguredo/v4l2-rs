@@ -19,6 +19,8 @@
   - @melpon
 - [FIX] Poller がアイドル状態の `POLLERR` で busy loop に陥る問題を修正し、`POLLHUP` / `POLLNVAL` はデバイス切断として終了するようにする
   - @melpon
+- [FIX] `EncodedFrame` / `DecodedFrame` / `ConvertedFrame` がコーデック本体より長寿命化すると、クローズ済み fd に ioctl が発行される問題を修正する
+  - @melpon
 
 ### misc
 

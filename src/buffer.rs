@@ -4,7 +4,9 @@
 //! unsafe はこのモジュールに集約する。
 
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::sync::Arc;
 
+use crate::device::Device;
 use crate::sys;
 
 /// mmap されたメモリ領域。
@@ -67,7 +69,7 @@ pub(crate) struct BufferPlane {
 
 /// REQBUFS で確保された一連のバッファ。
 pub(crate) struct BufferSet {
-    fd: RawFd,
+    device: Arc<Device>,
     buf_type: u32,
     memory: u32,
     buffers: Vec<Vec<BufferPlane>>,
@@ -78,7 +80,7 @@ impl BufferSet {
     ///
     /// `export_dmabuf` が true の場合、mmap の代わりに DMABUF FD をエクスポートする。
     pub fn allocate(
-        fd: RawFd,
+        device: Arc<Device>,
         buf_type: u32,
         memory: u32,
         count: u32,
@@ -92,7 +94,7 @@ impl BufferSet {
             flags: 0,
             reserved: [0; 3],
         };
-        sys::ioctl_reqbufs(fd, &mut req)?;
+        sys::ioctl_reqbufs(device.raw_fd(), &mut req)?;
 
         let actual_count = req.count;
         // REQBUFS の返却値に基づく事前割り当てはしない。
@@ -115,7 +117,7 @@ impl BufferSet {
                 planes: &mut plane as *mut _,
             };
 
-            sys::ioctl_querybuf(fd, &mut buf)?;
+            sys::ioctl_querybuf(device.raw_fd(), &mut buf)?;
 
             let plane_info = if export_dmabuf {
                 let mut expbuf = sys::v4l2_exportbuffer {
@@ -126,7 +128,7 @@ impl BufferSet {
                     fd: -1,
                     reserved: [0; 11],
                 };
-                sys::ioctl_expbuf(fd, &mut expbuf)?;
+                sys::ioctl_expbuf(device.raw_fd(), &mut expbuf)?;
 
                 let dmabuf_fd = unsafe { OwnedFd::from_raw_fd(expbuf.fd) };
                 BufferPlane {
@@ -142,7 +144,7 @@ impl BufferSet {
                 }
             } else {
                 let offset = unsafe { plane.m.mem_offset };
-                let region = MmapRegion::new(fd, plane.length as usize, offset)?;
+                let region = MmapRegion::new(device.raw_fd(), plane.length as usize, offset)?;
                 BufferPlane {
                     mapping: PlaneMapping::Mmap(region),
                     length: plane.length,
@@ -153,7 +155,7 @@ impl BufferSet {
         }
 
         Ok(BufferSet {
-            fd,
+            device,
             buf_type,
             memory,
             buffers,
@@ -215,6 +217,6 @@ impl Drop for BufferSet {
             flags: 0,
             reserved: [0; 3],
         };
-        let _ = sys::ioctl_reqbufs(self.fd, &mut req);
+        let _ = sys::ioctl_reqbufs(self.device.raw_fd(), &mut req);
     }
 }

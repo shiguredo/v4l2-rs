@@ -233,7 +233,7 @@ struct DecoderShared<T> {
     // decode() (メインスレッド) と poller スレッドの両方からアクセスするため Mutex で保護する。
     // ロック区間は ioctl 呼び出しを含まない短い処理で await が不要なため、mpsc チャネルより簡潔に済む。
     runtime: Mutex<DecoderRuntime<T>>,
-    fd: RawFd,
+    device: Arc<Device>,
     input_memory: Memory,
     output_memory: Memory,
     capture_buffer_count: u32,
@@ -259,13 +259,13 @@ impl<T> DecoderShared<T> {
 pub struct H264Decoder<H: DecodeHandler> {
     poller: Option<Poller>,
     shared: Arc<DecoderShared<H::UserData>>,
-    device: Device,
+    device: Arc<Device>,
 }
 
 impl<H: DecodeHandler> H264Decoder<H> {
     /// デコーダーを初期化する。
     pub fn new(config: DecoderConfig, mut handler: H) -> crate::error::Result<Self> {
-        let device = Device::open(&config.device_path)?;
+        let device = Arc::new(Device::open(&config.device_path)?);
         let fd = device.raw_fd();
 
         // OUTPUT フォーマット設定 (H.264 入力)
@@ -275,14 +275,14 @@ impl<H: DecodeHandler> H264Decoder<H> {
 
         // OUTPUT バッファ確保
         let output_buffers = BufferSet::allocate(
-            fd,
+            device.clone(),
             sys::V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE,
             output_v4l2_memory,
             config.output_buffer_count,
             false,
         )?;
         let output_queue = OutputQueue::new(
-            fd,
+            device.clone(),
             sys::V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE,
             output_v4l2_memory,
             output_buffers,
@@ -308,7 +308,7 @@ impl<H: DecodeHandler> H264Decoder<H> {
                 capture_started: false,
                 pending_values: VecDeque::new(),
             }),
-            fd,
+            device: device.clone(),
             input_memory: config.input_memory,
             output_memory: config.output_memory,
             capture_buffer_count: config.capture_buffer_count,
@@ -319,7 +319,7 @@ impl<H: DecodeHandler> H264Decoder<H> {
         let poller_shared = shared.clone();
         let poller = Poller::start(
             PollerConfig {
-                fd,
+                device: device.clone(),
                 output_buf_type: sys::V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE,
                 output_memory: output_v4l2_memory,
                 capture_buf_type: sys::V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE,
@@ -438,7 +438,7 @@ impl<H: DecodeHandler> H264Decoder<H> {
 
     fn handle_source_change(shared: &Arc<DecoderShared<H::UserData>>, handler: &mut H) {
         let resolution_result = (|| -> crate::error::Result<Resolution> {
-            let fd = shared.fd;
+            let fd = shared.device.raw_fd();
             let mut runtime = shared
                 .runtime
                 .lock()
@@ -476,14 +476,14 @@ impl<H: DecodeHandler> H264Decoder<H> {
 
             // 新しい CAPTURE バッファを確保
             let capture_buffers = BufferSet::allocate(
-                fd,
+                shared.device.clone(),
                 sys::V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE,
                 sys::V4L2_MEMORY_MMAP,
                 shared.capture_buffer_count,
                 export_dmabuf,
             )?;
             let capture_queue = Arc::new(CaptureQueue::new(
-                fd,
+                shared.device.clone(),
                 sys::V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE,
                 sys::V4L2_MEMORY_MMAP,
                 capture_buffers,
