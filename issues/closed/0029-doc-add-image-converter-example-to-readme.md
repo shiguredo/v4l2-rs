@@ -1,7 +1,7 @@
 # README.md に ImageConverter のサンプルと /dev/video12 の説明を追加する
 
 - Created: 2026-08-21
-- Completed:
+- Completed: 2026-08-25
 - Branch: feature/update-readme-image-converter-example
 - Polished:
 
@@ -31,3 +31,9 @@
 ## 変更対象
 
 - `README.md`
+
+## 解決方法
+
+- `README.md::特徴` に画像変換 (`/dev/video12`) - スケーリングと I420 ⇔ NV12 相互変換 を追加し、`/dev/video12` の存在を認知できるようにした
+- `README.md::使い方` に `### 画像変換` の節を追加し、`ConverterConfig::new(...)` → `ImageConverter::new(...)` → `convert(...)` の最小サンプルを掲載した
+- crates.io の crate ページから ImageConverter の存在を確認できる状態になった
