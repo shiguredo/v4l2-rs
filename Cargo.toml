@@ -1,6 +1,6 @@
 [package]
 name = "shiguredo_v4l2"
-version = "2026.2.0-canary.3"
+version = "2026.2.0"
 edition = "2024"
 rust-version = "1.93"
 description = "Rust binding for V4L2"
