@@ -1,0 +1,23 @@
+[package]
+name = "shiguredo_v4l2-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+
+[[bin]]
+bench = false
+doc = false
+name = "fuzz_format"
+path = "fuzz_targets/fuzz_format.rs"
+test = false
+
+[dependencies]
+# cargo-fuzz ランタイム
+libfuzzer-sys = "0.4"
+# 被テスト対象
+shiguredo_v4l2 = { path = ".." }

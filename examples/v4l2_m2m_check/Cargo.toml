@@ -2,8 +2,10 @@
 name = "v4l2_m2m_check"
 version = "0.0.0"
 edition = "2024"
+rust-version = "1.93"
 publish = false
 
 [dependencies]
+# CLI 引数のパースに利用する
 noargs = "0.4"
 shiguredo_v4l2 = { path = "../.." }

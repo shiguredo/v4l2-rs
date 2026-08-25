@@ -22,9 +22,9 @@ bcm2835-codec を利用した H.264 ハードウェアエンコード/デコー�
 ## バージョン情報
 
 - crate 名: `shiguredo_v4l2`
-- バージョン: 2026.1.0
+- バージョン: 2026.2.0
 - Rust Edition: 2024
-- 最小 Rust バージョン: 1.88
+- 最小 Rust バージョン: 1.93
 - ライセンス: Apache-2.0
 - 依存: `libc = "0.2"`
 
@@ -48,7 +48,7 @@ bcm2835-codec を利用した H.264 ハードウェアエンコード/デコー�
 |----|------|----------|
 | `Memory` | バッファのメモリ方式 | `Mmap` (カーネル mmap によるコピー入出力), `DmaBuf` (DMABUF によるゼロコピー入出力) |
 | `PixelFormat` | ピクセルフォーマット | `Yuv420` (I420), `Nv12`, `H264`, `to_fourcc()`, `from_fourcc()` |
-| `Resolution` | 映像解像度 (フィールド: `width`, `height`, `stride`) | `yuv420_size()` (stride × height × 3/2 のバイト数を算出) |
+| `Resolution` | 映像解像度 (フィールド: `width`, `height`, `stride`) | `yuv420_size()` (Y plane と chroma plane 2 面の合計バイト数を算出。chroma は 2 で切り上げるため奇数 stride / height でも平面分割のバイト数と一致し、飽和演算によりパニックしない) |
 | `Error` | V4L2 操作で発生するエラー | `DeviceOpen` / `Ioctl` / `Mmap` / `Poll` / `InvalidFormat` / `NoAvailableBuffer` / `NotStarted` / `StreamOn` / `StreamOff` / `InputTooLarge` / `MmapInputNotProduced` / `PollerAborted` |
 | `Result<T>` | `std::result::Result<T, Error>` のエイリアス | — |
 
@@ -64,7 +64,7 @@ bcm2835-codec を利用した H.264 ハードウェアエンコード/デコー�
 | `EncodeInput<'a, T>` | エンコード入力 | `Mmap(&mut FnMut(&mut [u8], &Resolution, &T) -> Option<usize>)`, `DmaBuf { fd, bytesused, length }` |
 | `EncodedFrame<T>` | エンコード結果のハンドル (`Drop` で自動再キュー) | `data()` (MMAP 出力時のみ Some), `dmabuf_fd()` (DMABUF 出力時のみ Some), `index()`, `bytesused()`, `length()`, `is_keyframe()`, `timestamp_us()`, `user_data()` |
 | `EncodeHandler` | エンコード完了通知トレイト | `type UserData`, `type Error: From<v4l2_m2m::Error>`, `on_encoded(Result<EncodedFrame<UserData>, Error>)` |
-| `FnEncodeHandler<T, E>` | `FnMut` クロージャを `EncodeHandler` にするラッパー | `new(FnMut(Result<EncodedFrame<T>, E>) + Send + 'static)` |
+| `FnEncodeHandler<T, E = Error>` | `FnMut` クロージャを `EncodeHandler` にするラッパー (`Error` はデフォルト値あり) | `new(FnMut(Result<EncodedFrame<T>, E>) + Send + 'static)` |
 | `H264Encoder<H: EncodeHandler>` | H.264 エンコーダー本体 | `new(EncoderConfig, H) -> Result<Self>`, `encode(EncodeInput, timestamp_us, force_keyframe, user_data) -> Result<()>`, `set_bitrate(bps) -> Result<()>`, `force_keyframe() -> Result<()>`, `resolution() -> Resolution` |
 
 #### `EncoderConfig` のフィールド (デフォルト値)
@@ -102,7 +102,7 @@ V4L2 用語の OUTPUT は「カーネルへの入力 (YUV)」、CAPTURE は「�
 | `DecodeInput<'a, T>` | デコード入力 | `Mmap(&mut FnMut(&mut [u8], &T) -> Option<usize>)`, `DmaBuf { fd, bytesused, length }` |
 | `DecodedFrame<T>` | デコード結果のハンドル (`Drop` で自動再キュー) | `data()`, `dmabuf_fd()`, `index()`, `bytesused()`, `length()`, `timestamp_us()`, `user_data()` |
 | `DecodeHandler` | デコード完了通知トレイト | `type UserData`, `type Error: From<v4l2_m2m::Error>`, `on_decoded(Result<DecodedFrame<UserData>, Error>)`, `on_resolution_changed(Resolution)` |
-| `FnDecodeHandler<T, E>` | `FnMut` クロージャを `DecodeHandler` にするラッパー | `new(on_decoded, on_resolution_changed)` |
+| `FnDecodeHandler<T, E = Error>` | `FnMut` クロージャを `DecodeHandler` にするラッパー (`Error` はデフォルト値あり) | `new(on_decoded, on_resolution_changed)` |
 | `H264Decoder<H: DecodeHandler>` | H.264 デコーダー本体 | `new(DecoderConfig, H) -> Result<Self>`, `decode(DecodeInput, timestamp_us, user_data) -> Result<()>`, `resolution() -> Option<Resolution>` |
 
 #### `DecoderConfig` のフィールド (デフォルト値)
@@ -120,7 +120,7 @@ V4L2 用語の OUTPUT は「カーネルへの入力 (YUV)」、CAPTURE は「�
 - `H264Decoder::new` 時点で OUTPUT (H.264 入力) のみ `STREAMON` し、CAPTURE バッファは未確保のまま `V4L2_EVENT_SOURCE_CHANGE` を購読する。
 - 初回 H.264 ストリームを feed すると `SOURCE_CHANGE` イベントが上がり、内部で `G_FMT` → CAPTURE バッファ確保 → `STREAMON` → `on_resolution_changed(Resolution)` 通知を行う。
 - 途中で解像度が変わった場合も同様に CAPTURE を `STREAMOFF` → 再確保 → `STREAMON` する。`on_resolution_changed` は変更が確定するたびに呼ばれる。
-- デバイスが `SOURCE_CHANGE` 購読に対応しない場合は `subscribe_events = false` で動作 (この場合は呼び出し側で適切な解像度ハンドリングが必要)。
+- `VIDIOC_SUBSCRIBE_EVENT` の成否は内部で自動判定され、購読に失敗したデバイス (非対応) ではイベント購読なしで動作する。この場合は `on_resolution_changed` が呼ばれないため、呼び出し側で適切な解像度ハンドリングが必要。
 - `H264Decoder::resolution()` は CAPTURE 確保前は `None`、確保後は `Some(Resolution)`。
 
 ### 画像変換器 (`ImageConverter<T>`)
@@ -173,9 +173,10 @@ V4L2 用語の OUTPUT は「カーネルへの入力 (YUV)」、CAPTURE は「�
 ## ライフサイクルと内部スレッド
 
 - 各コンポーネントは内部に Poller スレッド (`poll(2)` 監視) を 1 本持ち、CAPTURE/OUTPUT/EVENT を待つ。
+- Poller はデバイス切断 (`POLLHUP` / `POLLNVAL`) を検出すると `Error::Poll` を通知して終了する。`POLLERR` のみの状態 (STREAMON 前や全バッファ未 QBUF の正常な準備状態) では通知せず、busy loop を避けるため短時間スリープして再ループする。
 - ハンドラー (またはクロージャ) はこの Poller スレッドから呼ばれる。`Send + 'static` が要求される。
 - `H264Encoder` / `ImageConverter` は初回 `encode()` / `convert()` 時に Poller を起動する (遅延起動)。`H264Decoder` は `new()` 時点で起動する (SOURCE_CHANGE を待つため)。
-- Drop 順は `poller → shared → handler/callback → device` で、Poller スレッドが停止してから `STREAMOFF` → fd close する。`H264Encoder` / `H264Decoder` / `ImageConverter` の構造体定義の宣言順がこの Drop 順を保証している (壊さないこと)。
+- Drop 順は `poller → shared → handler/callback → device` で、Poller スレッドが停止してから `STREAMOFF` → fd close する。3 コンポーネントとも `device` (fd) が最後のフィールドになるよう構造体が宣言されており、この順序を保証している (壊さないこと)。`H264Decoder` はハンドラーをフィールドに持たず、`new()` の時点で Poller スレッドへ移動する。
 - `EncodedFrame` / `DecodedFrame` / `ConvertedFrame` の `Drop` は CAPTURE バッファを `QBUF` で再キューする。再キュー失敗は内部の async error キューに積まれ、次のイベント通知時にハンドラーへ伝播される。
 
 ## コード例
@@ -418,5 +419,5 @@ impl EncodeHandler for MyHandler {
 - **エンコーダー入力フォーマット**: `PixelFormat::Yuv420` (I420) と `PixelFormat::Nv12` のみ受け付ける。
 - **画像変換器のフォーマット**: 入力/出力ともに `Yuv420` / `Nv12` のみ。`H264` を指定すると `Error::InvalidFormat`。
 - **コントロール失敗の許容**: `EncoderConfig` の各 V4L2 コントロール (Profile / Level / I-Period / Repeat SPS/PPS / Bitrate) はデバイスによって未対応の場合があり、初期化時の `S_CTRL` 失敗は無視する (非致命的)。
-- **CAPTURE バッファサイズ**: H.264 出力の CAPTURE バッファは固定で 512KB の `sizeimage` を要求する。極端に大きなフレームでは `Error::InputTooLarge` の可能性がある。
+- **バッファサイズ**: エンコーダーの H.264 出力 (CAPTURE) とデコーダーの H.264 入力 (OUTPUT) は固定で 512KB の `sizeimage` を要求する。極端に大きなフレームでは `Error::InputTooLarge` の可能性がある。
 - **タイムスタンプ精度**: `timestamp_us` は `struct timeval` (`tv_sec * 1_000_000 + tv_usec`) で扱うため、マイクロ秒精度。

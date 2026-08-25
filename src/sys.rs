@@ -1,9 +1,8 @@
 //! V4L2 低レベル定数・構造体・ioctl ラッパー。
 //!
 //! `linux/videodev2.h` を参照し、必要な定数と構造体を手動定義する。
+//! 構造体名はカーネル API の命名 (v4l2_*) に合わせるためスネークケースのままとする。
 //! unsafe はこのモジュールに集約する。
-
-#![allow(non_camel_case_types)]
 
 use std::os::fd::RawFd;
 

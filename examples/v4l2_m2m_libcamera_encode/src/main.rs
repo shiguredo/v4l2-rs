@@ -22,7 +22,7 @@ const NAL_TYPE_SPS: u8 = 7;
 const NAL_TYPE_PPS: u8 = 8;
 
 /// YU12 (= I420) の FOURCC。V4L2_PIX_FMT_YUV420 と同じ値。
-const YU12_FOURCC: u32 = u32::from_le_bytes([b'Y', b'U', b'1', b'2']);
+const YU12_FOURCC: u32 = u32::from_le_bytes(*b"YU12");
 
 #[derive(Debug)]
 enum Error {

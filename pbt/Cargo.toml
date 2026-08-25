@@ -2,8 +2,10 @@
 name = "pbt"
 version = "0.0.0"
 edition = "2024"
+rust-version = "1.93"
 publish = false
 
 [dev-dependencies]
-proptest = "1"
+# PBT (Property-Based Testing) の実行に利用する
+proptest = "1.11"
 shiguredo_v4l2 = { path = ".." }

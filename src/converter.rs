@@ -188,12 +188,16 @@ struct ConverterRuntime<T> {
 }
 
 struct ConverterShared<T> {
+    // convert() (メインスレッド) と poller スレッドの両方からアクセスするため Mutex で保護する。
+    // ロック区間は ioctl 呼び出しを含まない短い処理で await が不要なため、mpsc チャネルより簡潔に済む。
     runtime: Mutex<ConverterRuntime<T>>,
     capture_queue: Arc<CaptureQueue>,
     input_resolution: Resolution,
     output_resolution: Resolution,
     input_memory: Memory,
     output_v4l2_memory: u32,
+    // Drop 後の再キュー失敗 (RequeueToken::requeue) を poller スレッドへ伝えるための共有バッファ。
+    // 排他アクセスは RequeueToken 側の短いロックで完結するため Mutex で十分である。
     pending_async_errors: Arc<Mutex<VecDeque<crate::error::Error>>>,
 }
 
@@ -215,7 +219,7 @@ pub struct ImageConverter<T> {
     poller: Option<Poller>,
     shared: Arc<ConverterShared<T>>,
     callback: Option<Box<ConverterCallback<T>>>,
-    device: Device,
+    device: Arc<Device>,
 }
 
 impl<T: Send + 'static> ImageConverter<T> {
@@ -227,7 +231,7 @@ impl<T: Send + 'static> ImageConverter<T> {
         Self::validate_pixel_format(config.input_pixel_format, "input")?;
         Self::validate_pixel_format(config.output_pixel_format, "output")?;
 
-        let device = Device::open(&config.device_path)?;
+        let device = Arc::new(Device::open(&config.device_path)?);
         let fd = device.raw_fd();
 
         let input_resolution = Self::set_output_format(
@@ -247,14 +251,14 @@ impl<T: Send + 'static> ImageConverter<T> {
 
         let output_v4l2_memory = config.input_memory.to_v4l2();
         let output_buffers = BufferSet::allocate(
-            fd,
+            device.clone(),
             sys::V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE,
             output_v4l2_memory,
             config.buffer_count,
             false,
         )?;
         let output_queue = OutputQueue::new(
-            fd,
+            device.clone(),
             sys::V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE,
             output_v4l2_memory,
             output_buffers,
@@ -264,14 +268,14 @@ impl<T: Send + 'static> ImageConverter<T> {
         let capture_v4l2_memory = sys::V4L2_MEMORY_MMAP;
         let export_dmabuf = matches!(config.output_memory, Memory::DmaBuf);
         let capture_buffers = BufferSet::allocate(
-            fd,
+            device.clone(),
             sys::V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE,
             capture_v4l2_memory,
             config.buffer_count,
             export_dmabuf,
         )?;
         let capture_queue = Arc::new(CaptureQueue::new(
-            fd,
+            device.clone(),
             sys::V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE,
             capture_v4l2_memory,
             capture_buffers,
@@ -410,13 +414,13 @@ impl<T: Send + 'static> ImageConverter<T> {
 
         let output_v4l2_memory = self.shared.output_v4l2_memory;
 
-        let fd = self.device.raw_fd();
+        let device = self.device.clone();
         let shared = self.shared.clone();
 
         // callback は poller スレッドのクロージャーが単独所有する。
         self.poller = Some(Poller::start(
             PollerConfig {
-                fd,
+                device,
                 output_buf_type: sys::V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE,
                 output_memory: output_v4l2_memory,
                 capture_buf_type: sys::V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE,

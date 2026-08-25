@@ -2,9 +2,12 @@
 name = "v4l2_m2m_encode"
 version = "0.0.0"
 edition = "2024"
+rust-version = "1.93"
 publish = false
 
 [dependencies]
+# CLI 引数のパースに利用する
 noargs = "0.4"
+# MP4 ファイルの書き出しに利用する
 shiguredo_mp4 = "2026.3.0"
 shiguredo_v4l2 = { path = "../.." }

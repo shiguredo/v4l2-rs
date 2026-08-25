@@ -1,8 +1,8 @@
 [package]
 name = "shiguredo_v4l2"
-version = "2026.1.0"
+version = "2026.2.0"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.93"
 description = "Rust binding for V4L2"
 readme = "README.md"
 homepage = "https://github.com/shiguredo/v4l2-rs"
@@ -19,4 +19,5 @@ members = [
 ]
 
 [dependencies]
+# V4L2 ioctl / mmap などのシステムコールを呼び出すために利用する
 libc = "0.2"
