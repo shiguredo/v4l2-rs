@@ -17,6 +17,8 @@
   - @voluntas
 - [FIX] `yuv420_size()` が奇数 stride / height で平面分割と必要なバイト数が一致しない問題を修正する
   - @melpon
+- [FIX] Poller がアイドル状態の `POLLERR` で busy loop に陥る問題を修正し、`POLLHUP` / `POLLNVAL` はデバイス切断として終了するようにする
+  - @melpon
 
 ### misc
 

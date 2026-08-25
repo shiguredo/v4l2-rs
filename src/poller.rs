@@ -138,6 +138,33 @@ impl Poller {
                 on_event(PollEvent::Error(err));
                 return;
             }
+
+            // ここでは POLLPRI / POLLOUT / POLLIN を全て処理済み。
+            // 出力専用フラグである POLLERR / POLLHUP / POLLNVAL は常に生成される可能性があるので、以下のように処理する。
+            //
+            // - POLLERR: OUTPUT / CAPTURE 両キューに処理待ちバッファが 1 つも無い状態で EPOLLERR を即座に返す。
+            //   この POLLERR はユーザー空間 API の定義通り「まだ VIDIOC_STREAMON していない、または VIDIOC_QBUF
+            //   していない」という正常な準備状態で、デバイス障害を意味しない。そのまま再ループすると poll() が
+            //   即座に POLLERR を返し続けて 100% CPU の busy loop に陥る。
+            //   よって終了せず、busy loop を避けるために短時間スリープして再ループする。
+            //
+            // - POLLHUP: poll(2) マニュアルでは「接続が切断された」を表すため、切断として終了する。
+            //
+            // - POLLNVAL: fd そのものが無効 (ファイルディスクリプタが閉じられた等)。こちらも確定
+            //   的に終了する。
+            if pollfd.revents & (libc::POLLHUP | libc::POLLNVAL) != 0 {
+                on_event(PollEvent::Error(crate::error::Error::Poll {
+                    source: std::io::Error::from(std::io::ErrorKind::ConnectionAborted),
+                }));
+                return;
+            }
+
+            if pollfd.revents & libc::POLLERR != 0
+                && pollfd.revents & (libc::POLLPRI | libc::POLLOUT | libc::POLLIN) == 0
+            {
+                // 一瞬だけスリープして再ループする
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
         }
     }
 
