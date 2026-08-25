@@ -1,8 +1,7 @@
 # STREAMON の 2 段呼び出しが部分失敗するとコーデックが復旧不能な状態に陥る問題を修正する
 
 - Created: 2026-08-21
-- Completed:
-- Branch: feature/fix-streamon-partial-failure
+- Completed: 2026-08-25
 - Polished: 2026-08-23
 
 ## 目的
@@ -60,3 +59,21 @@
 - `src/converter.rs`（`ImageConverter::convert` の STREAMON 順序、`ConverterRuntime` の状態フィールド、`ImageConverter::drop`）
 - `src/decoder.rs`（`H264Decoder::handle_source_change` の状態更新順序、`DecoderRuntime.capture_started` / `capture_queue` の関係、`H264Decoder::drop`）
 - `CHANGES.md`（`[FIX]` として追加）
+
+## 解決方法
+
+コード変更は行わず、closed にした。本 issue の前提（部分失敗後に前段の STREAMON が残り、再 STREAMON が EBUSY で失敗して復旧不能になる）が、V4L2 仕様と矛盾していたため。一次資料 `refs/v4l2/Documentation/userspace-api/media/v4l/` で裏付けを確認した。
+
+根拠（`refs/v4l2/Documentation/userspace-api/media/v4l/vidioc-streamon.rst`）:
+
+- 既に streaming 中の `VIDIOC_STREAMON` は 0 を返し、何も起きない。部分失敗後に前段を再 STREAMON しても EBUSY にはならないため、「EBUSY で永久失敗」は事実と逆。
+- m2m デバイスは CAPTURE / OUTPUT の双方が STREAMON されるまで起動しない。部分失敗時は前段だけが streaming でも処理は始まらず、後段が成功すれば処理が始まる。
+- `VIDIOC_STREAMON` の EINVAL は「バッファ未確保 / 未 QBUF」のときのみ。encoder / converter の CAPTURE はコンストラクタで `enqueue_all` 済みのため、仕様準拠ドライバでは後段 STREAMON の失敗経路自体がほぼ存在しない。
+
+上記より実際の挙動:
+
+- 部分失敗後の再試行では、前段の STREAMON はノーオペで成功し、後段が成功すればカーネル側に残っていたキュー済みバッファと `pending_values` が FIFO で対応して自然に回復する。
+- 失敗が続く場合も、バッファ枯渇で `NoAvailableBuffer` が返るだけであり、呼び出し元で扱える通常のエラーで「永久失敗」ではない。
+- Drop 時は fd を close すればカーネルがキューを解放する。`BufferSet` の Drop も munmap 後に `REQBUFS(count=0)` で解放するため、カーネル側に残留しない。
+
+対応不要と判断し、実装せず closed とした。
