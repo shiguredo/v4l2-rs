@@ -7,7 +7,7 @@
 
 ## 目的
 
-`RequeueToken`（フィールドと `requeue()` メソッド）、`drain_pending_async_errors`、`EncodedFrame` / `DecodedFrame` / `ConvertedFrame` の Drop 実装、Frame 型の共通メソッド（`data()` / `dmabuf_fd()` / `index()` / `bytesused()` / `length()` / `timestamp_us()`）が `src/encoder.rs` / `src/decoder.rs` / `src/converter.rs` の 3 モジュールにほぼ一字一句同一で複製されている。この複製により、致命的バグ 3 件（`issues/0003` / `0004`）が 3 モジュール独立に発生しており、修正時の一貫性を確保するのが困難。共通化する。
+`RequeueToken`（フィールドと `requeue()` メソッド）、`drain_pending_async_errors`、`EncodedFrame` / `DecodedFrame` / `ConvertedFrame` の Drop 実装、Frame 型の共通メソッド（`data()` / `dmabuf_fd()` / `index()` / `bytesused()` / `length()` / `timestamp_us()`）が `src/encoder.rs` / `src/decoder.rs` / `src/converter.rs` の 3 モジュールにほぼ一字一句同一で複製されている。この複製により、致命的バグ（`issues/0003` / `0010` 等）が 3 モジュール独立に発生しており、修正時の一貫性を確保するのが困難。共通化する。
 
 ## 現状
 
@@ -27,7 +27,7 @@
 - 各 Frame 型は `CaptureFrameBase` を保持するラッパーとし、固有フィールド（`is_keyframe` / `user_data`）と固有メソッドだけを追加する
 - `drain_pending_async_errors` は `pending_async_errors: Arc<Mutex<...>>` を扱う小さいヘルパー関数として共通化
 - 公開 API（EncodedFrame / DecodedFrame / ConvertedFrame の型名とメソッド名）は変更しない
-- リファクタリング単独の issue とし、バグ修正（`issues/0003` / `0004` / `0006` / `0010` 等）とは混ぜない
+- リファクタリング単独の issue とし、バグ修正（`issues/0003` / `0006` / `0010` 等）とは混ぜない
 - ただし、これらのバグ修正が本 issue の共通化を前提とする場合、着手順序は先にこちらを完了させる
 
 ## 完了条件

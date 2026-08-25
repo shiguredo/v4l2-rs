@@ -25,7 +25,7 @@
 
 - `RequeueToken::requeue` は runtime ロックを取得し、`self.capture_queue` が `runtime.capture_queue` と同一の `Arc` である場合のみ `enqueue` する（`Arc::ptr_eq` で判定）。active でない場合は enqueue をスキップする（古いキューへの stale QBUF を発行しない）
 - enqueue 失敗時は既存どおり `pending_async_errors` へ push し `eprintln!` でログ出力する（`issues/0008-bug-pending-async-errors-lost-after-drop.md` の確定設計）
-- `BufferSet::drop` が自動的に `REQBUFS(count=0)` を発行する設計をやめる（stale なキュー解放が新規バッファを解放する race の根本原因の除去）。バッファ解放が必要な箇所（`handle_source_change` の旧バッファ解放、`issues/0004-bug-streamon-partial-failure-state-corruption.md` のロールバック）では、意図したタイミングで明示的に `ioctl_reqbufs(count=0)` を呼ぶ
+- `BufferSet::drop` が自動的に `REQBUFS(count=0)` を発行する設計をやめる（stale なキュー解放が新規バッファを解放する race の根本原因の除去）。バッファ解放が必要な箇所（`handle_source_change` の旧バッファ解放）では、意図したタイミングで明示的に `ioctl_reqbufs(count=0)` を呼ぶ。encoder / converter 側は 0004 のロールバックが実装されず closed となったため、明示的な `ioctl_reqbufs(count=0)` の対象外とし、fd close によるカーネル側解放に任せる
 - 明示的な `ioctl_reqbufs(count=0)` は、古いキューにユーザーフレーム等の外部参照（`Arc<CaptureQueue>`）が残っていない場合のみ発行する。外部参照が残っている場合は `REQBUFS(count=0)` を発行せず、最後の参照解放時（`BufferSet::drop`）の munmap と fd close によるカーネル側解放に任せる。これにより、SOURCE_CHANGE をまたいで生存する古い `DecodedFrame` の `data()` / `dmabuf_fd()` が、明示的 `REQBUFS(count=0)` によって生存中に無効化されない
 - 古いキューに外部参照が残っている間に新規 `REQBUFS(count>0)` を発行すると、V4L2 仕様上 EBUSY になり得る（mapped / exported バッファが残っているため。`V4L2_BUF_CAP_SUPPORTS_ORPHANED_BUFS` 非対応時）。このため `handle_source_change` は、古いキューへの外部参照が残っている場合に新規 REQBUFS が EBUSY を返したら SOURCE_CHANGE を失敗として扱い、次の SOURCE_CHANGE で再試行する（古いフレームは通常すぐに drop されるため、再試行時に成功する）。なお REQBUFS の capabilities で `V4L2_BUF_CAP_SUPPORTS_ORPHANED_BUFS` を確認し、対応している場合は古いバッファを orphan 化して新規 REQBUFS が成功する
 - コーデック Drop 時は fd close でカーネルが全バッファを解放するため、自動 `REQBUFS(count=0)` の廃止による影響はない
