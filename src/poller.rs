@@ -3,11 +3,11 @@
 //! C++ の `V4L2Runner` に相当する。
 //! `poll()` でイベントを監視し、エンコーダー/デコーダーへ直接通知する。
 
-use std::os::fd::RawFd;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
 
+use crate::device::Device;
 use crate::sys;
 
 /// タイムスタンプ情報。
@@ -36,7 +36,7 @@ pub(crate) enum PollEvent {
 
 /// ポーリングスレッドの設定。
 pub(crate) struct PollerConfig {
-    pub fd: RawFd,
+    pub device: Arc<Device>,
     pub output_buf_type: u32,
     pub output_memory: u32,
     pub capture_buf_type: u32,
@@ -92,7 +92,7 @@ impl Poller {
             }
 
             let mut pollfd = libc::pollfd {
-                fd: config.fd,
+                fd: config.device.raw_fd(),
                 events: poll_events,
                 revents: 0,
             };
@@ -181,7 +181,7 @@ impl Poller {
         }
 
         let mut event: sys::v4l2_event = unsafe { std::mem::zeroed() };
-        match sys::ioctl_dqevent(config.fd, &mut event) {
+        match sys::ioctl_dqevent(config.device.raw_fd(), &mut event) {
             Ok(()) => {
                 if event.r#type == sys::V4L2_EVENT_SOURCE_CHANGE {
                     // event.u の先頭 4 バイトが v4l2_event_src_change.changes
@@ -259,7 +259,7 @@ impl Poller {
             planes: &mut plane as *mut _,
         };
 
-        match sys::ioctl_dqbuf(config.fd, &mut buf) {
+        match sys::ioctl_dqbuf(config.device.raw_fd(), &mut buf) {
             Ok(()) => Ok(Some(PollEvent::OutputDequeued { index: buf.index })),
             Err(crate::error::Error::Ioctl { source, .. })
                 if source.raw_os_error() == Some(libc::EAGAIN) =>
@@ -285,7 +285,7 @@ impl Poller {
             planes: &mut plane as *mut _,
         };
 
-        match sys::ioctl_dqbuf(config.fd, &mut buf) {
+        match sys::ioctl_dqbuf(config.device.raw_fd(), &mut buf) {
             Ok(()) => Ok(Some(PollEvent::CaptureDequeued {
                 index: buf.index,
                 bytesused: plane.bytesused,

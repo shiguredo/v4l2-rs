@@ -1,7 +1,7 @@
 # EncodedFrame / DecodedFrame / ConvertedFrame がコーデック本体より長寿命化するとクローズ済み fd に ioctl を撃つ問題を修正する
 
 - Created: 2026-08-21
-- Completed:
+- Completed: 2026-08-25
 - Branch: feature/fix-frame-outlives-codec-fd
 - Polished: 2026-08-23
 
@@ -53,3 +53,13 @@
 - `src/decoder.rs`（`RequeueToken` / `DecodedFrame` / `H264Decoder::drop`）
 - `src/converter.rs`（`RequeueToken` / `ConvertedFrame` / `ImageConverter::drop`）
 - `CHANGES.md`（`[FIX]` として追加）
+
+## 解決方法
+
+fd の共有単位を `Arc<Device>` に変更した。`Device`（内部で `OwnedFd` を保持）をキュー・バッファセット・ポーラー・デコーダーの共有状態と `Arc` で共有し、各 ioctl 呼び出しは `Device::raw_fd()` で生の fd を取得する。
+
+- `src/device.rs` の `Device` は `fd: OwnedFd` を保持し、`open()` は `Self` を返す。各コーデックが `Arc::new(Device::open(...)?)` で共有する
+- `src/queue.rs` の `OutputQueue` / `CaptureQueue`、`src/buffer.rs` の `BufferSet`、`src/poller.rs` の `PollerConfig` が `Arc<Device>` を保持する。`src/decoder.rs` の `DecoderShared` も `Arc<Device>` を保持する
+- フレームが保持する `Arc<CaptureQueue>` が生きている限り、経由して保持される `Arc<Device>` も生き続けるため、コーデック本体 Drop 後にフレームを Drop しても、`RequeueToken::requeue` の `VIDIOC_QBUF` と `BufferSet::drop` の `VIDIOC_REQBUFS` はいずれも正しい (クローズされていない) fd に対して発行される。fd 番号が再利用される経路は存在しない
+- `Arc<Device>` のみを共有の単位とするため、キュー・バッファセット・ポーラーは `Device` からしか生成できず、無関係な生 fd を渡す誤用を型レベルで防ぐ
+- `tests/test_converter.rs` の `EncoderValue` / `DecoderValue` / `ConverterOutValue`（フレームを `user_data` として持ち回す使い方）は無変更のまま動作する

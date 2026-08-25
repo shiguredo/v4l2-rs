@@ -2,13 +2,15 @@
 
 use std::collections::VecDeque;
 use std::os::fd::{AsRawFd, RawFd};
+use std::sync::Arc;
 
 use crate::buffer::{BufferSet, PlaneMapping};
+use crate::device::Device;
 use crate::sys;
 
 /// OUTPUT キュー (エンコーダー/デコーダーへの入力)。
 pub(crate) struct OutputQueue {
-    fd: RawFd,
+    device: Arc<Device>,
     buf_type: u32,
     memory: u32,
     buffers: BufferSet,
@@ -17,7 +19,7 @@ pub(crate) struct OutputQueue {
 
 impl OutputQueue {
     /// OUTPUT キューを作成する。
-    pub fn new(fd: RawFd, buf_type: u32, memory: u32, buffers: BufferSet) -> Self {
+    pub fn new(device: Arc<Device>, buf_type: u32, memory: u32, buffers: BufferSet) -> Self {
         let count = buffers.count();
         // バッファ数は 4 〜 12 程度で、with_capacity との性能差は無視できる
         let mut available = VecDeque::new();
@@ -25,7 +27,7 @@ impl OutputQueue {
             available.push_back(i);
         }
         OutputQueue {
-            fd,
+            device,
             buf_type,
             memory,
             buffers,
@@ -112,7 +114,7 @@ impl OutputQueue {
             planes: &mut plane_info as *mut _,
         };
 
-        sys::ioctl_qbuf(self.fd, &mut buf)
+        sys::ioctl_qbuf(self.device.raw_fd(), &mut buf)
     }
 
     /// DMABUF fd を設定して QBUF する (ゼロコピー)。
@@ -137,7 +139,7 @@ impl OutputQueue {
 
 /// CAPTURE キュー (エンコーダー/デコーダーからの出力)。
 pub(crate) struct CaptureQueue {
-    fd: RawFd,
+    device: Arc<Device>,
     buf_type: u32,
     memory: u32,
     buffers: BufferSet,
@@ -145,9 +147,9 @@ pub(crate) struct CaptureQueue {
 
 impl CaptureQueue {
     /// CAPTURE キューを作成する。
-    pub fn new(fd: RawFd, buf_type: u32, memory: u32, buffers: BufferSet) -> Self {
+    pub fn new(device: Arc<Device>, buf_type: u32, memory: u32, buffers: BufferSet) -> Self {
         CaptureQueue {
-            fd,
+            device,
             buf_type,
             memory,
             buffers,
@@ -185,7 +187,7 @@ impl CaptureQueue {
             planes: &mut plane_info as *mut _,
         };
 
-        sys::ioctl_qbuf(self.fd, &mut buf)
+        sys::ioctl_qbuf(self.device.raw_fd(), &mut buf)
     }
 
     /// バッファセットへの参照を取得する。

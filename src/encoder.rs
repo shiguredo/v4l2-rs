@@ -363,13 +363,13 @@ pub struct H264Encoder<H: EncodeHandler> {
     poller: Option<Poller>,
     shared: Arc<EncoderShared<H::UserData>>,
     handler: Option<H>,
-    device: Device,
+    device: Arc<Device>,
 }
 
 impl<H: EncodeHandler> H264Encoder<H> {
     /// エンコーダーを初期化する。
     pub fn new(config: EncoderConfig, handler: H) -> crate::error::Result<Self> {
-        let device = Device::open(&config.device_path)?;
+        let device = Arc::new(Device::open(&config.device_path)?);
         let fd = device.raw_fd();
 
         let stride = if config.stride == 0 {
@@ -402,14 +402,14 @@ impl<H: EncodeHandler> H264Encoder<H> {
 
         // OUTPUT バッファ確保
         let output_buffers = BufferSet::allocate(
-            fd,
+            device.clone(),
             sys::V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE,
             output_memory,
             config.output_buffer_count,
             false,
         )?;
         let output_queue = OutputQueue::new(
-            fd,
+            device.clone(),
             sys::V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE,
             output_memory,
             output_buffers,
@@ -418,14 +418,14 @@ impl<H: EncodeHandler> H264Encoder<H> {
         // CAPTURE バッファ確保
         let export_capture_dmabuf = matches!(config.output_memory, Memory::DmaBuf);
         let capture_buffers = BufferSet::allocate(
-            fd,
+            device.clone(),
             sys::V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE,
             sys::V4L2_MEMORY_MMAP,
             config.capture_buffer_count,
             export_capture_dmabuf,
         )?;
         let capture_queue = Arc::new(CaptureQueue::new(
-            fd,
+            device.clone(),
             sys::V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE,
             sys::V4L2_MEMORY_MMAP,
             capture_buffers,
@@ -592,14 +592,14 @@ impl<H: EncodeHandler> H264Encoder<H> {
             return;
         };
 
-        let fd = self.device.raw_fd();
+        let device = self.device.clone();
         let output_memory = self.shared.output_memory;
 
         let shared = self.shared.clone();
         // handler は poller スレッドのクロージャーが単独所有する。
         self.poller = Some(Poller::start(
             PollerConfig {
-                fd,
+                device,
                 output_buf_type: sys::V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE,
                 output_memory,
                 capture_buf_type: sys::V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE,
